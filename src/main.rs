@@ -1,10 +1,7 @@
-use std::{collections::HashMap, fmt::Display, io::stdin};
+use once_cell::sync::Lazy;
+use std::{collections::HashMap, fmt::Display, io::stdin, sync::Mutex};
 
-use rand::Rng;
-
-#[macro_use]
-extern crate lazy_static;
-
+// TODO: Do I even need cicular buffer anywhere?
 #[derive(Clone)]
 pub struct CircularBuffer<T> {
     buffer: Vec<T>,
@@ -118,11 +115,23 @@ impl<T> CircularBuffer<T> {
 #[derive(Clone, Debug)]
 struct State {
     pub num: usize,
+    variables: HashMap<String, Value>,
 }
 
 impl State {
     pub fn new() -> Self {
-        Self { num: 0 }
+        Self {
+            num: 0,
+            variables: HashMap::new(),
+        }
+    }
+    // TODO: Make generic over return type, or return Value sumtype
+    fn get_variable<'a>(&'a self, name: &str) -> &'a Value {
+        self.variables.get(name).unwrap()
+    }
+
+    fn assign_variable(&mut self, name: &str, value: Value) {
+        self.variables.insert(name.to_string(), value);
     }
 }
 
@@ -132,224 +141,323 @@ impl Display for State {
     }
 }
 
-#[derive(Clone)]
-struct TrackedState {
-    pub current: State,
-    pub past: State,
-    past_to_current: CircularBuffer<&'static PrintableFunction>,
-    // pub future: Option<State>, TODO:
+struct Functions {
+    pub functions: HashMap<String, Box<Function>>,
+    pub assertions: HashMap<String, Box<Assertion>>,
 }
 
-impl Display for TrackedState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Current: {}", self.current)?;
-        writeln!(f, "Past: {}", self.past)?;
-        writeln!(f, "Applied functions: {}", self.past_to_current)
-    }
-}
-
-impl TrackedState {
-    fn new(past_offset: usize) -> Self {
+impl Functions {
+    pub fn new() -> Self {
         Self {
-            current: State::new(),
-            past: State::new(),
-            past_to_current: CircularBuffer::new(past_offset),
+            functions: HashMap::new(),
+            assertions: HashMap::new(),
+        }
+    }
+    pub fn get_fn(&self, name: &str) -> Option<&Function> {
+        // TODO: The double refer seems a bit weird
+        self.functions.get(name).map(|v| &**v)
+    }
+
+    pub fn add_fn(&mut self, name: &str, func: &Function) {
+        self.functions.insert(name.to_string(), Box::new(func));
+    }
+
+    pub fn get_assertion(&self, name: &str) -> Option<&Assertion> {
+        // TODO: The double refer seems a bit weird
+        self.assertions.get(name).map(|v| &**v)
+    }
+
+    pub fn add_assertion(&mut self, name: &str, func: &Assertion) {
+        self.assertions.insert(name.to_string(), Box::new(func));
+    }
+}
+
+static FUNCTIONS: Lazy<Mutex<Functions>> = Lazy::new(|| Mutex::new(Functions::new()));
+
+fn get_fn(name: &String) -> FunctionResult<&Function> {
+    FUNCTIONS
+        .lock()
+        .unwrap()
+        .get_fn(name)
+        .ok_or_else(|| FunctionFailure::UnknownFunction(name.clone()))
+}
+
+fn get_assertion(name: &String) -> FunctionResult<&Assertion> {
+    FUNCTIONS
+        .lock()
+        .unwrap()
+        .get_assertion(name)
+        .ok_or_else(|| FunctionFailure::UnknownFunction(name.clone()))
+}
+
+fn add_fn(name: &str, func: &Function) {
+    FUNCTIONS.lock().unwrap().add_fn(name, func);
+}
+
+#[derive(Clone)]
+struct Program {
+    entries: Vec<ProgramEntry>,
+    idx: usize,
+}
+
+#[derive(Clone)]
+enum ProgramEntry {
+    Function(String),
+    Assertion(String),
+}
+
+impl Program {
+    // TODO: Replace with a proper init method
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            idx: 0,
         }
     }
 
-    fn as_computation_result(&mut self, result: Result<(), String>) -> ComputationResult<()> {
-        result.map_err(|reason| {
-            println!("Breaking with reason: '{reason}'");
-            ComputationError::ApplicationFailed(std::mem::replace(
-                self,
-                TrackedState::new(self.past_to_current.max_size),
-            ))
-        })
-    }
+    pub fn set(&mut self, idx: usize, new: ProgramEntry) -> FunctionResult<()> {
+        let mut existing = self
+            .entries
+            .get_mut(idx)
+            .ok_or_else(|| FunctionFailure::OutOfProgramBounds(idx))?;
 
-    fn apply(&mut self, func: &'static PrintableFunction) -> ComputationResult<()> {
-        // Stage computation so it shows up if any call here fails
-        self.past_to_current.stage(func);
-
-        if self.past_to_current.is_full() {
-            let res = (func.f)(&mut self.current);
-            self.as_computation_result(res)?; // TODO: There has to be a better way to do this
-        } else {
-            let res = (func.f)(&mut self.current);
-            self.as_computation_result(res)?;
-            let res = (func.f)(&mut self.past);
-            self.as_computation_result(res)?;
-        }
-
-        self.past_to_current.insert_stage();
+        *existing = new;
 
         Ok(())
     }
 
-    fn assert(&mut self, assertion: impl FnOnce(&State) -> bool) -> ComputationResult<()> {
-        if !assertion(&self.current) {
+    pub fn push_fn(&mut self, fn_name: &str) {
+        self.entries
+            .push(ProgramEntry::Function(fn_name.to_string()));
+    }
+
+    pub fn push_assertion(&mut self, assertion_name: &str) {
+        self.entries
+            .push(ProgramEntry::Assertion(assertion_name.to_string()));
+    }
+
+    // End is inclusive
+    pub fn iter(&self, start: usize, end: usize) -> impl Iterator<Item = &ProgramEntry> + '_ {
+        self.entries.iter().skip(start).take(end - start + 1)
+    }
+
+    // TODO: This returning FunctionResult is an indicator that might not be named well.
+    pub fn get(&self, idx: usize) -> &ProgramEntry {
+        // Should only be used from TrackedState, so the function idx must exist.
+        &self.entries[idx]
+    }
+}
+
+// TODO: Sumtype
+type Value = usize;
+
+#[derive(Clone)]
+struct TrackedState {
+    pub current: State,
+    pub past: State,
+    // Program keeps the full program text, from beginning to end.
+    // Past and current are states that point to a function in program. States in past and current
+    // change as they move along program. You can change program, but that does not cause current
+    // to be recomputed. TODO: Maybe it should though.
+    program: Program,
+    current_function_index: usize,
+    past_function_index: usize,
+    past_offset: usize, // How far apart current and past should be (how far they really are apart starts at 0)
+                        // Future is not special. It's just a branch where current becomes past, then the new current goes
+                        // ahead.
+}
+
+impl Display for TrackedState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Display will not print the whole program. A seperate method will do that.
+        writeln!(f, "Current: {}", self.current)?;
+        writeln!(f, "Past: {}", self.past)?;
+        write!(f, "Functions between past and current: ")?;
+        for entry in self
+            .program
+            .iter(self.current_function_index, self.past_function_index)
+        {
+            let func_name = match entry {
+                ProgramEntry::Function(name) => name,
+                ProgramEntry::Assertion(name) => name,
+            };
+            write!(f, "{}", func_name)?;
+        }
+        writeln!(f)
+    }
+}
+
+enum StateDesignator {
+    Past,
+    Current,
+}
+
+impl TrackedState {
+    fn new(program: Program, past_offset: usize) -> Self {
+        Self {
+            current: State::new(),
+            past: State::new(),
+            program,
+            past_function_index: 0,
+            current_function_index: 0,
+            past_offset,
+        }
+    }
+
+    fn step_state(&mut self, state: StateDesignator) -> FunctionResult<()> {
+        let (idx, state) = match state {
+            StateDesignator::Past => (&mut self.past_function_index, &self.past),
+            StateDesignator::Current => (&mut self.current_function_index, &self.current),
+        };
+
+        match self.program.get(*idx) {
+            ProgramEntry::Function(fn_name) => get_fn(fn_name)?(&mut self.current)?,
+            ProgramEntry::Assertion(assertion_name) => get_assertion(assertion_name)?(&self)?,
+        };
+
+        *idx += 1;
+
+        Ok(())
+    }
+
+    fn step(&mut self) -> FunctionResult<()> {
+        self.step_state(StateDesignator::Current)?;
+
+        if self.current_function_index - self.past_function_index < self.past_offset {
+            self.step_state(StateDesignator::Past)?;
+        }
+
+        Ok(())
+    }
+
+    fn assert(&self, assertion: impl FnOnce(&TrackedState) -> bool) -> FunctionResult<()> {
+        if !assertion(self) {
             // TODO: Prolly too many copies in the long run
-            Err(ComputationError::AssertionFailed(std::mem::replace(
-                self,
-                TrackedState::new(self.past_to_current.max_size),
-            )))
+            Err(FunctionFailure::AssertionFailed(self.clone()))
         } else {
             Ok(())
         }
     }
 
+    fn past_to_current(&self) -> impl Iterator<Item = &ProgramEntry> + '_ {
+        self.program
+            .iter(self.past_function_index, self.current_function_index)
+    }
+
     // TODO: Here we can insert changable elements.
-    // TODO: Need to cleanly separate which functions destroy the inner state of this object
     // and which operate on alternative executions
-    fn sync_past_to_current(&mut self) -> ComputationResult<()> {
-        let mut result = Ok(());
-        // Weird construt to avoid borrow checking rules
-        for past_fn in self.past_to_current.iter() {
-            match (past_fn.f)(&mut self.past) {
-                Ok(_) => continue,
-                Err(fail) => {
-                    result = Err(fail);
-                    break;
-                }
-            }
+    fn sync_past_to_current(&mut self) -> FunctionResult<()> {
+        while self.past_function_index < self.current_function_index {
+            self.step_state(StateDesignator::Past)?;
         }
 
-        self.as_computation_result(result)
+        Ok(())
         // TODO: Most common case is prolly to then assert equality (e.g. replace something in
         // past, then check if that was equivalent). But not always. Sometimes you just wanna
         // change the past.
     }
 
-    // TODO: Unify terminology around computation/function/what's recorded and what's applicable
-    fn change_past_computation(&mut self, index: usize, new: &'static PrintableFunction) {
-        self.past_to_current.replace(index, new);
+    fn change_program(&mut self, index: usize, new_entry: ProgramEntry) {
+        self.program.set(index, new_entry);
     }
 }
 
-enum ComputationError {
-    ApplicationFailed(TrackedState),
-    AssertionFailed(TrackedState),
+enum FunctionFailure {
+    CallFailed(String),
+    AssertionFailed(String),
+    UnknownFunction(String),
+    OutOfProgramBounds(usize),
 }
 
-impl ComputationError {
-    fn take_tracked_state(self) -> TrackedState {
-        match self {
-            ComputationError::ApplicationFailed(tracked_state) => tracked_state,
-            ComputationError::AssertionFailed(tracked_state) => tracked_state,
-        }
-    }
-    fn get_tracked_state_mut(&mut self) -> &mut TrackedState {
-        match self {
-            ComputationError::ApplicationFailed(tracked_state) => tracked_state,
-            ComputationError::AssertionFailed(tracked_state) => tracked_state,
-        }
-    }
-    fn get_tracked_state(&self) -> &TrackedState {
-        match self {
-            ComputationError::ApplicationFailed(tracked_state) => tracked_state,
-            ComputationError::AssertionFailed(tracked_state) => tracked_state,
-        }
-    }
-}
-
-impl Display for ComputationError {
+impl Display for FunctionFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ComputationError::ApplicationFailed(tracked_state) => {
-                write!(f, "Application Failed: {}", tracked_state)
+            FunctionFailure::CallFailed(tracked_state) => {
+                write!(f, "Application Failed: {tracked_state}")
             }
-            ComputationError::AssertionFailed(tracked_state) => {
-                write!(f, "Assertion failed: {}", tracked_state)
+            FunctionFailure::AssertionFailed(tracked_state) => {
+                write!(f, "Assertion failed: {tracked_state}")
+            }
+            FunctionFailure::UnknownFunction(fn_name) => write!(f, "Unknown function: '{fn_name}'"),
+            FunctionFailure::OutOfProgramBounds(idx) => {
+                write!(f, "Index '{idx}' is out of program bounds")
             }
         }
     }
 }
 
 // TODO: Generic
-type ComputationResult<T> = Result<T, ComputationError>;
+type FunctionResult<T> = Result<T, FunctionFailure>;
 
 // TODO: Macro, and with variadic parameters
 // TODO: Make Err generic
-struct PrintableFunction {
-    name: &'static str,
-    f: &'static (dyn Fn(&mut State) -> Result<(), String> + Sync),
-}
+// TODO: Closures
+// TODO: Make this be able to print its inner computations somehow. Prolly needs recursive
+// definition in terms of other functions all the way down
+type Function = (dyn Fn(&mut State) -> FunctionResult<()> + Sync + Send);
+// Assertions have (immuatable) access to all the tracked state. TODO: Maybe even to more than one
+// branch in the future
+type Assertion = (dyn Fn(&TrackedState) -> bool + Sync + Send);
 
-impl PrintableFunction {
-    pub fn new(
-        name: &'static str,
-        f: &'static (dyn Fn(&mut State) -> Result<(), String> + Sync),
-    ) -> Self {
-        Self { f, name }
-    }
-}
+fn build_program() -> Program {
+    let mut program = Program::new();
 
-impl Display for PrintableFunction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}()", self.name)
-    }
-}
-
-lazy_static! {
-    static ref INCREMENT: PrintableFunction = PrintableFunction::new("increment", &|state| {
-        state.num += 1;
-
-        if rand::thread_rng().gen_range(0..100) == 1 {
+    {
+        // Define functions we'll use in this program
+        let funcs = FUNCTIONS.lock().unwrap();
+        funcs.add_fn("increment", &|state| {
             state.num += 1;
-        }
-
-        Ok(())
-    });
-    static ref MULTIPLY: PrintableFunction = PrintableFunction::new("multiply", &|state| {
-        state.num *= 2;
-        Ok(())
-    });
-    static ref FALLIBLE_SUB: PrintableFunction = PrintableFunction::new("fallible", &|state| {
-        if rand::thread_rng().gen_range(0..5) == 1 {
-            Err("Unlucky".to_string())
-        } else {
-            state.num -= 1;
             Ok(())
-        }
-    });
-}
+        });
 
-lazy_static! {
-    static ref PRINTABLE_FUNCTIONS_ARRAY: [&'static PrintableFunction; 3] =
-        [&INCREMENT, &MULTIPLY, &FALLIBLE_SUB];
-    static ref PRINTABLE_FUNCTIONS: HashMap<&'static str, &'static PrintableFunction> =
-        HashMap::from(PRINTABLE_FUNCTIONS_ARRAY.map(|f| (f.name, f)));
-}
+        funcs.add_fn("multiply", &|state| {
+            state.num *= 2;
+            Ok(())
+        });
 
-fn computation(tracked: &mut TrackedState) -> ComputationResult<()> {
-    for _ in 0..200 {
-        let num = tracked.current.num;
+        funcs.add_fn("fallible", &|state| {
+            Err(FunctionFailure::CallFailed("Unlucky".to_string()))
+        });
 
-        tracked.apply(&INCREMENT)?;
+        funcs.add_fn("assign_num", &|state| {
+            state.assign_variable("num", state.num);
+            Ok(())
+        });
 
-        tracked.assert(|current| current.num == num + 1)?
+        funcs.add_assertion("increment_good", &|tracked| {
+            tracked.current.num == *tracked.current.get_variable("num") + 1
+        });
+
+        funcs.add_assertion("multiply_good", &|tracked| {
+            tracked.current.num == *tracked.current.get_variable("num") * 2
+        });
     }
+
+    // Build the program
+    for _ in 0..200 {
+        program.push_fn("assign_num");
+        program.push_fn("increment");
+        program.push_assertion("increment_good");
+    }
+
+    program.push_fn("fallible");
 
     for _ in 0..10 {
-        let num = tracked.current.num;
-        tracked.apply(&MULTIPLY)?;
-        tracked.assert(|current| current.num == num * 2)?;
+        program.push_fn("assign_num");
+        program.push_fn("multiply");
+        program.push_assertion("multiply_good");
     }
 
-    for _ in 0..2 {
-        let num = tracked.current.num;
-        tracked.apply(&FALLIBLE_SUB)?;
-        tracked.assert(|current| current.num == num - 1)?;
-    }
-
-    Ok(())
+    program
 }
 
 enum UserChoice {
     Ignore,
     ExecutePastTillCurrent,
-    ChangePastComputation { index: usize, new_fn_name: String },
+    ChangeProgramEntry { index: usize, new_fn_name: String },
     PrintState, // TODO: Allow choosing what to print
+    ShowDefinedAssertions,
+    ShowDefinedFunctions,
 }
 
 fn get_user_choice() -> UserChoice {
@@ -371,17 +479,16 @@ fn get_user_choice() -> UserChoice {
             let index = str::parse::<usize>(sel[0]).unwrap();
             let new_fn_name = sel[1].to_string();
 
-            UserChoice::ChangePastComputation { index, new_fn_name }
+            UserChoice::ChangeProgramEntry { index, new_fn_name }
         }
         _ => UserChoice::PrintState,
     }
 }
 
-fn user_interaction(mut error: ComputationError) -> TrackedState {
+fn user_interaction(mut error: FunctionFailure, tracked: &mut TrackedState) {
     println!("{}", error);
 
     let mut alternative_executions = Vec::new(); // TODO: Actually use this
-    let tracked_state = error.get_tracked_state_mut();
 
     loop {
         println!("i(gnore)|e(xecute) past|p(rint) state|c(hange) past");
@@ -389,7 +496,7 @@ fn user_interaction(mut error: ComputationError) -> TrackedState {
         match get_user_choice() {
             UserChoice::Ignore => break,
             UserChoice::ExecutePastTillCurrent => {
-                let mut alternative = tracked_state.clone();
+                let mut alternative = tracked.clone();
 
                 alternative.sync_past_to_current().unwrap_or_else(|state| {
                     // TODO: Don't unwrap, allow another user interaction loop
@@ -402,34 +509,46 @@ fn user_interaction(mut error: ComputationError) -> TrackedState {
                 );
                 alternative_executions.push(alternative);
             }
-            UserChoice::PrintState => println!("{}", tracked_state),
-            UserChoice::ChangePastComputation { index, new_fn_name } => {
-                let new_func = if let Some(func) = PRINTABLE_FUNCTIONS.get(new_fn_name.as_str()) {
+            UserChoice::PrintState => println!("{}", tracked),
+            UserChoice::ChangeProgramEntry { index, new_fn_name } => {
+                let new_func = if let Some(func) = get_fn(new_fn_name.as_str()) {
                     func
                 } else {
                     continue;
                 };
                 // TODO: I'm just gonna change that in place for now, but it should really branch
-                tracked_state.change_past_computation(index, new_func);
+                tracked.change_program(index, new_func);
 
                 println!("Changed past");
             }
+            UserChoice::ShowDefinedAssertions => {
+                println!("Defined Functions: ");
+                for function in FUNCTIONS.lock().unwrap().functions {
+                    println!("{}", function.0);
+                }
+            }
+            UserChoice::ShowDefinedFunctions => {
+                println!("Defined Assertions: ");
+                for assertion in FUNCTIONS.lock().unwrap().assertions {
+                    println!("{}", assertion.0);
+                }
+            }
         }
     }
-
-    error.take_tracked_state()
 }
 
 fn main() {
-    let mut current = TrackedState::new(50);
+    let program = build_program();
+
+    let mut tracked = TrackedState::new(program, 50);
 
     loop {
-        match computation(&mut current) {
+        match tracked.step() {
             Ok(()) => {
-                println!("Done:\n{}", current);
+                println!("Done:\n{}", tracked);
                 break;
             }
-            Err(paused) => current = user_interaction(paused),
+            Err(error) => user_interaction(error, &mut tracked),
         }
     }
 }
