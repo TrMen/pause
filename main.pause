@@ -1,0 +1,44 @@
+struct state {
+    num: u64 = 0,
+    stored: u64 = 0,
+    s: some_struct = {},
+}
+
+struct some_struct {
+    num: u64 = 0,
+}
+
+procedure increment {
+    num +=1;
+
+    // TODO: Unused so far
+    s.num += 1;
+}
+
+assertion increment_good {
+    current:num == current:stored + 1
+}
+
+assertion ambitious {
+    current:s.num + 1 == past:s.num + 1 + 1
+}
+
+//procedure fallible {
+//    error "Unlucky"
+//}
+
+// procedure other {
+//   increment()
+//   increment()
+//}
+
+procedure store {
+    stored = num;
+}
+
+
+procedure main {
+    store();
+    increment();
+    !increment_good;
+}
