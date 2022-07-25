@@ -20,7 +20,7 @@ pub enum ValueKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StateDesignator {
+pub enum ExecutionDesignator {
     Past,
     Current,
 }
@@ -30,11 +30,14 @@ pub enum TokenKind {
     Value(ValueKind),
     BinaryOp(BinaryOp),
     AssignOp(AssignOp),
-    StateDesignator(StateDesignator),
+    ExecutionDesignator(ExecutionDesignator),
     Identifier,
+    SmallArrow,
     Procedure,
     Assertion,
+    Function,
     SemiColon,
+    DotDot,
     Struct,
     Dot,
     Slash,
@@ -130,10 +133,17 @@ impl<'a> Lexer<'a> {
                 Some(_) => TokenKind::AssignOp(AssignOp::PlusEqual),
                 None => TokenKind::BinaryOp(BinaryOp::Plus),
             },
-            b'-' => TokenKind::BinaryOp(BinaryOp::Minus),
+            b'-' => match self.advance_if_next_is(b'>') {
+                Some(_) => TokenKind::SmallArrow,
+                None => TokenKind::BinaryOp(BinaryOp::Minus),
+            },
             b';' => TokenKind::SemiColon,
             b':' => TokenKind::Colon,
             b'!' => TokenKind::Bang,
+            b'.' => match self.advance_if_next_is(b'.') {
+                Some(_) => TokenKind::DotDot,
+                None => TokenKind::Dot,
+            },
             b'.' => TokenKind::Dot,
             b'"' => TokenKind::DoubleQuote,
             b'=' => match self.advance_if_next_is(b'=') {
@@ -144,22 +154,28 @@ impl<'a> Lexer<'a> {
             b'c' => {
                 return Some(self.keyword_or_identifier(
                     "urrent",
-                    TokenKind::StateDesignator(StateDesignator::Current),
+                    TokenKind::ExecutionDesignator(ExecutionDesignator::Current),
                 ))
             }
             b't' => {
                 return Some(self.keyword_or_identifier("rue", TokenKind::Value(ValueKind::True)))
             }
-            b'f' => {
-                return Some(self.keyword_or_identifier("alse", TokenKind::Value(ValueKind::False)))
-            }
+            b'f' => match self.advance()? {
+                b'a' => {
+                    return Some(
+                        self.keyword_or_identifier("lse", TokenKind::Value(ValueKind::False)),
+                    )
+                }
+                b'u' => return Some(self.keyword_or_identifier("nction", TokenKind::Function)),
+                _ => return Some(self.identifier()),
+            },
             b'a' => return Some(self.keyword_or_identifier("ssertion", TokenKind::Assertion)),
             b'p' => match self.advance()? {
                 b'r' => return Some(self.keyword_or_identifier("ocedure", TokenKind::Procedure)),
                 b'a' => {
                     return Some(self.keyword_or_identifier(
                         "st",
-                        TokenKind::StateDesignator(StateDesignator::Past),
+                        TokenKind::ExecutionDesignator(ExecutionDesignator::Past),
                     ))
                 }
                 _ => return Some(self.identifier()),

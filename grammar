@@ -1,5 +1,5 @@
 program = top_level_decl...
-top_level_decl = struct | prodedure | assertion
+top_level_decl = struct | prodedure | assertion | function
 
 struct = 'struct' 'identifier' '{' vardecl... '}'
 vardecl = identifer ':' type '=' initializer ','
@@ -7,19 +7,23 @@ initializer = value | '{''}'
 
 procedure = 'procedure' identifier '{' procedure_body '}'
 assertion = 'assertion' identifier '{' expression '}'
+function = 'function' identifier '(' params ')' '->' identifier '{' expression '}'
 
 procedure_body = statement...
-statement = assertion_statement | expression ';' | identifier_access assign_op expression ';'
-procedure_call = identifier '(' ')'
-assertion_statement = '!' identifier ! ';' 
+statement = procedure_call | assertion_statement | expression ';' | state_access assign_op expression ';'
+procedure_call_ = '..' identifier ';'
+assertion_statement = '!' identifier ';' 
 
 expression = simple_expression | simple_expression binary_operator expression
-simple_expression = procedure_call | value | identifier_access | state_access
+simple_expression = function_call | value | state_access | binding_access  | execution_access
 
-state_access = state_designator ':' indentifier_access
+execution_access = execution_designator ':' state_access
+function_call = 'identifier' '(' arguments ')'
+arguments = expression | expression ',' arguments
 
-identifier_access = identifier | identifier '.' identifier_access
-state_designator = 'current' | 'past'
+state_access = '.' identifier | '.' identifier state_access
+binding_access = = identifier | identifier '.' binding_access
+execution_designator = 'current' | 'past'
 
 assign_op = '+=' | '='
 identifier = [a-zA-Z_]
@@ -32,8 +36,9 @@ string = '"'char...'"'
 Additional rules:
 - Must have a procedure called 'main' and a struct called 'state'
  - Structs must init all members. Other structs can be initialized to whatever they say with "= {}" TODO: Or members can be specified
-- Cannot do state_access within procedures. Only assertions
-
+- Cannot do execution_designator within procedures. Only assertions
+- Expressions always yield a value (that's why any expression is fine in an assertion)
+- The expressions in functions cannot access state. Only in procedures (and there also assign), and assertions (read-only there)
 
 
 TODO:
