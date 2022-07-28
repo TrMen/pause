@@ -49,6 +49,8 @@ pub enum TokenKind {
     RightParen,
     LeftBrace,
     RightBrace,
+    LeftBracket,
+    RightBracket,
 }
 
 #[derive(Debug, Clone)]
@@ -144,7 +146,6 @@ impl<'a> Lexer<'a> {
                 Some(_) => TokenKind::DotDot,
                 None => TokenKind::Dot,
             },
-            b'.' => TokenKind::Dot,
             b'"' => TokenKind::DoubleQuote,
             b'=' => match self.advance_if_next_is(b'=') {
                 Some(_) => TokenKind::BinaryOp(BinaryOp::EqualEqual),
@@ -157,6 +158,8 @@ impl<'a> Lexer<'a> {
                     TokenKind::ExecutionDesignator(ExecutionDesignator::Current),
                 ))
             }
+            b'[' => TokenKind::LeftBracket,
+            b']' => TokenKind::RightBracket,
             b't' => {
                 return Some(self.keyword_or_identifier("rue", TokenKind::Value(ValueKind::True)))
             }

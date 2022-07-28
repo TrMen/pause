@@ -2,35 +2,42 @@ program = top_level_decl...
 top_level_decl = struct | prodedure | assertion | function
 
 struct = 'struct' 'identifier' '{' vardecl... '}'
-vardecl = identifer ':' type '=' initializer ','
+vardecl = identifer ':' type_name '=' initializer ','
 initializer = value | '{''}'
 
 procedure = 'procedure' identifier '{' procedure_body '}'
 assertion = 'assertion' identifier '{' expression '}'
-function = 'function' identifier '(' params ')' '->' identifier '{' expression '}'
+function = 'function' identifier '(' params ')' '->' type_name '{' expression '}'
 
+params = identifier ':' type_name [','] | identifier ':' type_name ',' params
 procedure_body = statement...
-statement = procedure_call | assertion_statement | expression ';' | state_access assign_op expression ';'
+statement = procedure_call | assertion_statement | expression ';' | simple_expression assign_op expression ';'
 procedure_call_ = '..' identifier ';'
 assertion_statement = '!' identifier ';' 
 
-expression = simple_expression | simple_expression binary_operator expression
-simple_expression = function_call | value | state_access | binding_access  | execution_access
+expression = simple_expression | simple_expression binary_operator expression 
+simple_expression = function_call | value | state_access | binding_access | execution_access | array_access
 
 execution_access = execution_designator ':' state_access
-function_call = 'identifier' '(' arguments ')'
-arguments = expression | expression ',' arguments
+function_call = identifier '(' arguments ')'
+arguments = expression [','] | expression ',' arguments
 
-state_access = '.' identifier | '.' identifier state_access
-binding_access = = identifier | identifier '.' binding_access
+state_access = '.' identifier_or_array_access | '.' identifier state_access
+binding_access = identifier_or_array_access | identifier '.' binding_access
+identifier_or_array_access = identifier | array_access
+array_access = expression '[' expression ']'
+
+expression_list = expression [','] | expression ',' expression_list
+
 execution_designator = 'current' | 'past'
-
 assign_op = '+=' | '='
 identifier = [a-zA-Z_]
 binary_operator = '==' | '+'
-type = 'u64' | 'string'
-value = '1'.. | string | 'true' | 'false'
+value = '1'.. | string | 'true' | 'false' | array
+array = '[' expression_list ']'
 string = '"'char...'"'
+type_name = buildin_type | identifier | '[' ']'
+buildin_type = 'u64' | 'string'
 
 
 Additional rules:
@@ -39,9 +46,13 @@ Additional rules:
 - Cannot do execution_designator within procedures. Only assertions
 - Expressions always yield a value (that's why any expression is fine in an assertion)
 - The expressions in functions cannot access state. Only in procedures (and there also assign), and assertions (read-only there)
+- SimpleExpression on lhs of assigment must refer to state
 
 
 TODO:
 - '!' assertion_predicate for simple inline assertions
 - Allow expressions as initializers for struct field 
 - Make struct literals values and allow them in expressions
+- Allow more than just literal values in arrays
+- Functions as values
+

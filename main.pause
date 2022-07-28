@@ -2,6 +2,7 @@ struct state {
     num: u64 = 0,
     stored: u64 = 0,
     s: some_struct = {},
+    others: [] = [], // TODO: Typed arrays
 }
 
 struct some_struct {
@@ -44,6 +45,10 @@ function add(lhs: u64, rhs: u64) -> u64 {
     lhs + rhs
 }
 
+function access(arr: [], index: u64) -> u64 {
+    arr[index]
+}
+
 procedure main {
     .num = 2;
 
@@ -60,5 +65,9 @@ procedure main {
     .num = plus_one(plus_one(8));
     .stored = add(14, 100);
 
-    .s.num = 2;
+    .others = [2,3,4];
+
+    .stored = access([1,2,9001,3], 2);
+
+    .others[2] = 2;
 }

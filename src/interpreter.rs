@@ -4,7 +4,9 @@ use thiserror::Error;
 
 use crate::{
     lexer::{AssignOp, ExecutionDesignator},
-    parser::{AccessPath, Expression, Program, SimpleExpression, Statement, Struct, Value},
+    parser::{
+        AccessPath, Expression, Indirection, Program, SimpleExpression, Statement, Struct, Value,
+    },
 };
 
 #[derive(Error, Debug)]
@@ -48,6 +50,12 @@ pub enum InterpretationError {
         expected: usize,
         actual: usize,
     },
+    #[error("Trying to access array with index value '{value:#?}' of type '{type_name}'. Only integers are allowed.")]
+    ArrayIndexTypeError { value: Value, type_name: String },
+    #[error("Trying to access value '{value:#?}' as if it were an array.")]
+    ArrayTypeError { value: Value },
+    #[error("Out of bounds array access on '{:#?}'. Index: '{index}'")]
+    OutOfBoundsArrayAccess { array: Value, index: u64 },
 }
 
 use InterpretationError::*;
@@ -154,7 +162,7 @@ impl Interpreter {
         assign_op: &AssignOp,
         rhs: &Expression,
     ) -> InterpretationResult<()> {
-        let value = self.evaluate_expression(program, rhs)?;
+        let rhs_value = self.evaluate_expression(program, rhs)?;
 
         let state_field = self
             .state
@@ -166,26 +174,35 @@ impl Interpreter {
                 field_name: lhs.name.clone(),
             })?;
 
-        if !lhs.fields.is_empty() {
-            todo!("Struct access for state")
+        let mut lhs_value = &mut state_field.initial_value;
+
+        for indirection in &lhs.indirections {
+            match indirection {
+                crate::parser::Indirection::Field(_) => todo!("Struct field access"),
+                crate::parser::Indirection::Subscript(index) => {
+                    let index = self.evaluate_expression(program, &index)?;
+                    lhs_value = self.access_array_mut(lhs_value, index)?
+                }
+            }
         }
 
-        if value.type_name() != state_field.type_name {
+        //        let lhs_value =
+        //           self.access_indirections(program, &mut state_field.initial_value, &lhs.indirections)?;
+
+        if rhs_value.type_name() != state_field.type_name {
             return Err(AssignmentTypeMissmatch {
-                value: value.clone(),
+                value: rhs_value.clone(),
                 expected: state_field.type_name.clone(),
-                actual: value.type_name().to_string(),
+                actual: rhs_value.type_name().to_string(),
             });
         }
 
         match assign_op {
             // TODO: This should not use the Struct strucutre, since that's for source code
             // definitions.
-            AssignOp::Equal => state_field.initial_value = value,
+            AssignOp::Equal => *lhs_value = rhs_value,
             AssignOp::PlusEqual => {
-                if let (Value::Number(lhs), Value::Number(rhs)) =
-                    (&mut state_field.initial_value, value)
-                {
+                if let (Value::Number(lhs), Value::Number(rhs)) = (lhs_value, rhs_value) {
                     *lhs += rhs;
                 } else {
                     todo!("Invalid assignment");
@@ -199,7 +216,7 @@ impl Interpreter {
     // TODO: This can be pub if expressions have no side effects. They can right now through
     // procedure calls
     fn evaluate_expression(
-        &mut self,
+        &self,
         program: &Program,
         expression: &Expression,
     ) -> InterpretationResult<Value> {
@@ -224,20 +241,81 @@ impl Interpreter {
     }
 
     fn evaluate_simple_expression(
-        &mut self,
+        &self,
         program: &Program,
         simple: &SimpleExpression,
     ) -> InterpretationResult<Value> {
         match simple {
-            crate::parser::SimpleExpression::Value(value) => Ok(value.clone()),
-            crate::parser::SimpleExpression::StateAccess(access_path) => {
-                self.state_access(access_path)
-            }
-            crate::parser::SimpleExpression::FunctionCall { name, arguments } => {
+            SimpleExpression::Value(value) => Ok(value.clone()),
+            SimpleExpression::StateAccess(access_path) => self.state_access(access_path),
+            SimpleExpression::FunctionCall { name, arguments } => {
                 self.evaluate_function(program, name, arguments)
             }
-            crate::parser::SimpleExpression::ExecutionAccess { execution, path } => todo!(),
-            crate::parser::SimpleExpression::BindingAccess(path) => self.binding_access(path),
+            SimpleExpression::ExecutionAccess { execution, path } => todo!(),
+            SimpleExpression::BindingAccess(path) => self.binding_access(program, path),
+            SimpleExpression::ArrayLiteral(array) => {
+                let mut evaluated_array = Vec::new();
+                for expression in array {
+                    evaluated_array.push(self.evaluate_expression(program, expression)?);
+                }
+
+                Ok(Value::Array(evaluated_array))
+            }
+            SimpleExpression::ArrayAccess { target, index } => {
+                let target = self.evaluate_expression(program, target)?;
+                let index = self.evaluate_expression(program, index)?;
+
+                self.access_array(&target, index).cloned()
+            }
+        }
+    }
+
+    fn access_array_mut(
+        &self,
+        array: &mut Value,
+        index: Value,
+    ) -> InterpretationResult<&mut Value> {
+        if let Value::Number(index) = &index {
+            if let Value::Array(array) = array {
+                Ok(array
+                    .get_mut(*index as usize)
+                    .ok_or_else(|| OutOfBoundsArrayAccess {
+                        array: Value::Array(array.clone()),
+                        index: *index,
+                    })?)
+            } else {
+                Err(ArrayTypeError {
+                    value: array.clone(),
+                })
+            }
+        } else {
+            Err(ArrayIndexTypeError {
+                value: index.clone(),
+                type_name: index.type_name().to_string(),
+            })
+        }
+    }
+
+    // TODO: Don't replicate these so much
+    fn access_array(&self, array: &Value, index: Value) -> InterpretationResult<&Value> {
+        if let Value::Number(index) = &index {
+            if let Value::Array(array) = &array {
+                Ok(array
+                    .get_mut(*index as usize)
+                    .ok_or_else(|| OutOfBoundsArrayAccess {
+                        array: Value::Array(array.clone()),
+                        index: *index,
+                    })?)
+            } else {
+                Err(ArrayTypeError {
+                    value: array.clone(),
+                })
+            }
+        } else {
+            Err(ArrayIndexTypeError {
+                value: index.clone(),
+                type_name: index.type_name().to_string(),
+            })
         }
     }
 
@@ -255,14 +333,14 @@ impl Interpreter {
         // TODO: Initial value shouldn't be here
         let value = field.initial_value.clone();
 
-        if !path.fields.is_empty() {
+        if !path.indirections.is_empty() {
             todo!("Struct access");
         }
 
         Ok(value)
     }
 
-    fn binding_access(&self, path: &AccessPath) -> InterpretationResult<Value> {
+    fn binding_access(&self, program: &Program, path: &AccessPath) -> InterpretationResult<Value> {
         let binding = self
             .bindings
             .get(&path.name)
@@ -270,15 +348,51 @@ impl Interpreter {
 
         let value = binding.value.clone();
 
-        if !path.fields.is_empty() {
-            todo!("Struct access")
+        let value = self.access_indirections(program, &mut value, &path.indirections)?;
+
+        Ok(value.clone())
+    }
+
+    fn access_indirections(
+        &self,
+        program: &Program,
+        mut value: &Value,
+        indirections: &Vec<Indirection>,
+    ) -> InterpretationResult<&Value> {
+        for indirection in indirections {
+            match indirection {
+                crate::parser::Indirection::Field(_) => todo!("Struct field access"),
+                crate::parser::Indirection::Subscript(index) => {
+                    let index = self.evaluate_expression(program, &index)?;
+                    value = self.access_array(&value, index)?
+                }
+            }
+        }
+
+        Ok(value)
+    }
+
+    fn access_indirections_mut(
+        &mut self,
+        program: &Program,
+        mut value: &mut Value,
+        indirections: &Vec<Indirection>,
+    ) -> InterpretationResult<&mut Value> {
+        for indirection in indirections {
+            match indirection {
+                crate::parser::Indirection::Field(_) => todo!("Struct field access"),
+                crate::parser::Indirection::Subscript(index) => {
+                    let index = self.evaluate_expression(program, &index)?;
+                    value = self.access_array_mut(&mut value, index)?
+                }
+            }
         }
 
         Ok(value)
     }
 
     fn evaluate_function(
-        &mut self,
+        &self,
         program: &Program,
         name: &str,
         arguments: &Vec<Expression>,

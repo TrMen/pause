@@ -14,6 +14,7 @@ pub enum Value {
     Bool(bool),
     // TODO: The fields of a struct literal aren't really typed, right?
     StructLiteral { fields: Vec<StructField> },
+    Array(Vec<Value>),
 }
 
 impl Value {
@@ -25,11 +26,6 @@ impl Value {
             TokenKind::Value(ValueKind::False) => Self::Bool(false),
             _ => panic!("Value::from_token() with bad token '{:?}'", token),
         }
-    }
-
-    pub fn type_matches(&self, other: &Value) -> bool {
-        // TODO: This doesn't work for structs that are different
-        std::mem::discriminant(self) == std::mem::discriminant(other)
     }
 
     pub fn empty_struct() -> Value {
@@ -62,20 +58,33 @@ impl Value {
             Value::String(_) => "string",
             Value::Number(_) => "u64",
             Value::Bool(_) => "bool",
-            Value::StructLiteral { .. } => "struct", // TODO: Print fields
+            Value::StructLiteral { .. } => "Struct",
+            Value::Array(_) => "Array",
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum Indirection {
+    Field(String),
+    Subscript(Box<Expression>),
+    // TODO: Add function calls
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AccessPath {
     pub name: String,
-    pub fields: Vec<String>,
+    pub indirections: Vec<Indirection>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SimpleExpression {
     Value(Value),
+    ArrayLiteral(Vec<Expression>),
+    ArrayAccess {
+        target: Box<Expression>,
+        index: Box<Expression>,
+    },
     StateAccess(AccessPath),
     ExecutionAccess {
         execution: ExecutionDesignator,
@@ -182,6 +191,8 @@ impl Program {
                     SimpleExpression::ExecutionAccess { execution, path } => todo!(),
                     SimpleExpression::FunctionCall { name, arguments } => todo!(),
                     SimpleExpression::BindingAccess(_) => todo!(),
+                    SimpleExpression::ArrayLiteral(_) => todo!(),
+                    SimpleExpression::ArrayAccess { target, index } => todo!(),
                 },
                 Expression::Binary { .. } => todo!(),
             },
@@ -260,6 +271,7 @@ pub struct Parser {
     structs: HashMap<String, Struct>,
 }
 
+// TODO: Why was that a macro again? I think because of borrowing rules
 // (self, pattern) -> ParseResult<Option<&Token>>
 macro_rules! advance_if_matches {
     ($self:ident, $pattern:pat) => {{
@@ -521,7 +533,7 @@ impl Parser {
                 let name = this.expect(TokenKind::Identifier)?.lexeme.clone();
                 this.expect(TokenKind::Colon)?;
 
-                let type_name = this.expect(TokenKind::Identifier)?.lexeme.clone();
+                let type_name = this.type_name()?;
 
                 this.expect(TokenKind::AssignOp(AssignOp::Equal))?;
 
@@ -532,6 +544,11 @@ impl Parser {
                         this.expect(TokenKind::RightBrace)?;
 
                         Value::empty_struct()
+                    }
+                    TokenKind::LeftBracket => {
+                        this.expect(TokenKind::RightBracket)?;
+
+                        Value::Array(Vec::new())
                     }
                     TokenKind::Value(_) => Value::from_token(next),
                     _ => unexpected("Value or struct literal", next)?,
@@ -554,6 +571,18 @@ impl Parser {
         self.define_struct(name, fields)?;
 
         Ok(())
+    }
+
+    fn type_name(&mut self) -> ParseResult<String> {
+        let next = self.advance()?;
+        match next.kind {
+            TokenKind::LeftBracket => {
+                self.expect(TokenKind::RightBracket)?;
+                Ok("Array".to_string())
+            }
+            TokenKind::Identifier => Ok(next.lexeme.clone()),
+            _ => unexpected("type name", next)?,
+        }
     }
 
     fn assertion(&mut self) -> ParseResult<()> {
@@ -582,7 +611,7 @@ impl Parser {
 
                 this.expect(TokenKind::Colon)?;
 
-                let type_name = this.expect(TokenKind::Identifier)?.lexeme.clone();
+                let type_name = this.type_name()?;
 
                 Ok(FunctionParameter { name, type_name })
             },
@@ -592,7 +621,7 @@ impl Parser {
 
         self.expect(TokenKind::SmallArrow)?;
 
-        let return_type = self.expect(TokenKind::Identifier)?.lexeme.clone();
+        let return_type = self.type_name()?;
 
         self.expect(TokenKind::LeftBrace)?;
 
@@ -632,13 +661,15 @@ impl Parser {
                 // - 1 because the dot itself was already consumed
                 let old_index = self.index - 1;
 
-                let lhs = self.state_access()?;
+                let lhs = self.access_path()?;
 
                 if let Some(assign_op) = extract_if_kind_matches!(self, TokenKind::AssignOp)? {
                     let rhs = self.expression()?;
 
                     self.expect(TokenKind::SemiColon)?;
 
+                    // TODO: Check that lhs is state assignment (prolly needs to happen at runtime
+                    // fro now)
                     Statement::StateAssignment {
                         lhs,
                         assign_op,
@@ -687,43 +718,46 @@ impl Parser {
         }
     }
 
-    fn state_access(&mut self) -> ParseResult<AccessPath> {
-        let identifier_name = self.expect(TokenKind::Identifier)?.lexeme.clone();
+    fn access_path(&mut self) -> ParseResult<AccessPath> {
+        let name = self.expect(TokenKind::Identifier)?.lexeme.clone();
 
-        let mut field_names = Vec::new();
-        while advance_if_matches!(self, TokenKind::Dot)?.is_some() {
-            let field = self.expect(TokenKind::Identifier)?;
+        let mut indirections = Vec::new();
+        loop {
+            if advance_if_matches!(self, TokenKind::Dot)?.is_some() {
+                let field = self.expect(TokenKind::Identifier)?;
+                indirections.push(Indirection::Field(field.lexeme.clone()));
+            } else if advance_if_matches!(self, TokenKind::LeftBracket)?.is_some() {
+                let index = Box::new(self.expression()?);
+                self.expect(TokenKind::RightBracket)?;
 
-            field_names.push(field.lexeme.clone());
+                indirections.push(Indirection::Subscript(index));
+            } else {
+                break;
+            }
         }
 
-        Ok(AccessPath {
-            name: identifier_name,
-            fields: field_names,
-        })
-    }
-
-    fn binding_access(&mut self, name: String) -> ParseResult<AccessPath> {
-        let mut field_names = Vec::new();
-        while advance_if_matches!(self, TokenKind::Dot)?.is_some() {
-            let field = self.expect(TokenKind::Identifier)?;
-
-            field_names.push(field.lexeme.clone());
-        }
-
-        Ok(AccessPath {
-            name,
-            fields: field_names,
-        })
+        Ok(AccessPath { name, indirections })
     }
 
     fn simple_expression(&mut self) -> ParseResult<SimpleExpression> {
         let next = self.advance()?.clone();
 
-        match next.kind {
+        let simple_expression = match next.kind {
+            TokenKind::LeftBracket => {
+                let array = collect_list!(
+                    self,
+                    |this: &mut Self| { this.expression() },
+                    TokenKind::Comma,
+                    TokenKind::RightBracket
+                )?;
+
+                // TODO: Arrays should hold the same type
+
+                Ok(SimpleExpression::ArrayLiteral(array))
+            }
             TokenKind::Value(_) => Ok(SimpleExpression::Value(Value::from_token(&next))),
             // TODO: Allow struct literals here
-            TokenKind::Dot => Ok(SimpleExpression::StateAccess(self.state_access()?)),
+            TokenKind::Dot => Ok(SimpleExpression::StateAccess(self.access_path()?)),
             TokenKind::Identifier => {
                 if advance_if_matches!(self, TokenKind::LeftParen)?.is_some() {
                     // Function call
@@ -739,20 +773,34 @@ impl Parser {
                         arguments,
                     })
                 } else {
-                    Ok(SimpleExpression::BindingAccess(
-                        self.binding_access(next.lexeme)?,
-                    ))
+                    // Pub back the identifier
+                    self.go_back();
+                    Ok(SimpleExpression::BindingAccess(self.access_path()?))
                 }
             }
             TokenKind::ExecutionDesignator(execution) => {
                 self.expect(TokenKind::Colon)?;
                 self.expect(TokenKind::Dot)?;
-                let path = self.state_access()?;
+                let path = self.access_path()?;
 
                 Ok(SimpleExpression::ExecutionAccess { execution, path })
             }
 
             _ => unexpected("Value or identifer access", &next)?,
+        }?;
+
+        // TODO: There's no way this is enough. Array access needs proper precedence parsing :<
+        if advance_if_matches!(self, TokenKind::LeftBracket)?.is_some() {
+            let index = Box::new(self.expression()?);
+
+            self.expect(TokenKind::RightBracket)?;
+
+            Ok(SimpleExpression::ArrayAccess {
+                target: Box::new(Expression::Simple(simple_expression)),
+                index,
+            })
+        } else {
+            Ok(simple_expression)
         }
     }
 }
