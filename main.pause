@@ -1,7 +1,7 @@
 struct state {
     num: u64 = 0,
     stored: u64 = 0,
-    //s: some_struct = {},
+    s: some_struct = {},
 }
 
 struct some_struct {
@@ -13,9 +13,6 @@ procedure increment {
     // This isn't really needed, since functions can't access state anyway
     // but this makes it visually clear
     .num +=1;
-
-    // TODO: Unused so far
-    //.s.num += 1;
 }
 
 assertion increment_good {
@@ -33,17 +30,18 @@ assertion increment_good {
 // Procdures take and return nothing. 
 // They take their state from the 'state' field and assign to it.
 procedure store {
-    .stored = num;
+    .stored = .num;
 }
 
 // Functions cannot access state, and only take and return values
 // They cannot change any state in any way
 // Functions are just expressions, so any other construct can call them
 function plus_one (i: u64) -> u64 {
-// TODO: Should these be only one expr like in functional languages?
-// Or allow local state?
-// I kinda wanna do it
     i + 1
+}
+
+function add(lhs: u64, rhs: u64) -> u64 {
+    lhs + rhs
 }
 
 procedure main {
@@ -55,8 +53,12 @@ procedure main {
     .num = 6;
     .num = 7;
     .num = 4 + 4;
-//    ..store;
-//    ..increment;
-//    !increment_good;
-//    .num = plus_one(plus_one(.num));
+    .num = .num + 1;
+    ..store;
+    ..increment;
+//  !increment_good;
+    .num = plus_one(plus_one(8));
+    .stored = add(14, 100);
+
+    .s.num = 2;
 }

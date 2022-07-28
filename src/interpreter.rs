@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{
     lexer::{AssignOp, ExecutionDesignator},
-    parser::{AccessPath, Expression, Program, Statement, Struct, Value},
+    parser::{AccessPath, Expression, Program, SimpleExpression, Statement, Struct, Value},
 };
 
 #[derive(Error, Debug)]
@@ -114,8 +114,6 @@ impl Interpreter {
     }
 
     fn statement(&mut self, program: &Program, stmt: &Statement) -> InterpretationResult<()> {
-        program.ensure_uses_defined_components(stmt)?;
-
         match stmt {
             Statement::AssertionCall { name } => self.call_assertion(program, name),
             Statement::StateAssignment {
@@ -206,17 +204,62 @@ impl Interpreter {
         expression: &Expression,
     ) -> InterpretationResult<Value> {
         match expression {
-            Expression::Simple(simple) => match simple {
-                crate::parser::SimpleExpression::Value(value) => Ok(value.clone()),
-                crate::parser::SimpleExpression::StateAccess(_) => todo!(),
-                crate::parser::SimpleExpression::FunctionCall { name, arguments } => {
-                    self.evaluate_function(program, name, arguments)
+            Expression::Binary { lhs, op, rhs } => {
+                let lhs = self.evaluate_simple_expression(program, lhs)?;
+
+                let rhs = self.evaluate_expression(program, rhs)?;
+
+                match op {
+                    crate::lexer::BinaryOp::Plus => {
+                        Ok(Value::Number(lhs.as_number() + rhs.as_number()))
+                    }
+                    crate::lexer::BinaryOp::Minus => {
+                        Ok(Value::Number(lhs.as_number() - rhs.as_number()))
+                    }
+                    crate::lexer::BinaryOp::EqualEqual => Ok(Value::Bool(lhs == rhs)),
                 }
-                crate::parser::SimpleExpression::ExecutionAccess { execution, path } => todo!(),
-                crate::parser::SimpleExpression::BindingAccess(path) => self.binding_access(path),
-            },
-            Expression::Binary { lhs, op, rhs } => todo!(),
+            }
+            Expression::Simple(simple) => self.evaluate_simple_expression(program, simple),
         }
+    }
+
+    fn evaluate_simple_expression(
+        &mut self,
+        program: &Program,
+        simple: &SimpleExpression,
+    ) -> InterpretationResult<Value> {
+        match simple {
+            crate::parser::SimpleExpression::Value(value) => Ok(value.clone()),
+            crate::parser::SimpleExpression::StateAccess(access_path) => {
+                self.state_access(access_path)
+            }
+            crate::parser::SimpleExpression::FunctionCall { name, arguments } => {
+                self.evaluate_function(program, name, arguments)
+            }
+            crate::parser::SimpleExpression::ExecutionAccess { execution, path } => todo!(),
+            crate::parser::SimpleExpression::BindingAccess(path) => self.binding_access(path),
+        }
+    }
+
+    fn state_access(&self, path: &AccessPath) -> InterpretationResult<Value> {
+        let field = self
+            .state
+            .fields
+            .iter()
+            .find(|field| field.name == path.name)
+            .ok_or_else(|| UndefinedStructField {
+                structure: "state".to_string(),
+                field_name: path.name.clone(),
+            })?;
+
+        // TODO: Initial value shouldn't be here
+        let value = field.initial_value.clone();
+
+        if !path.fields.is_empty() {
+            todo!("Struct access");
+        }
+
+        Ok(value)
     }
 
     fn binding_access(&self, path: &AccessPath) -> InterpretationResult<Value> {

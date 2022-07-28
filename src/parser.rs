@@ -36,6 +36,14 @@ impl Value {
         Value::StructLiteral { fields: Vec::new() }
     }
 
+    pub fn as_number(&self) -> u64 {
+        // TODO: Get rid of all this for proper typing
+        match self {
+            Value::Number(num) => *num,
+            _ => todo!("Not a number"),
+        }
+    }
+
     pub fn is_truthy(&self) -> InterpretationResult<bool> {
         // TODO: Do I even want to have that? Better to typecheck, and then we simply don't have
         // the 'Value' enum at all
@@ -125,7 +133,7 @@ pub struct Struct {
     pub fields: Vec<StructField>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionParameter {
     pub name: String,
     pub type_name: String,
@@ -271,6 +279,49 @@ macro_rules! advance_if_matches {
     }};
 }
 
+// TODO: This is one macro too deep. This is nasty
+
+// (self, Fn(&mut Self) -> ParseResult<T>, separator: Pattern, terminator: Pattern)
+// -> ParseResult<Vec<T>>
+macro_rules! collect_list {
+    // This is needed to turn the pattern into a string for the inner macro invocation
+    ($self:ident, $parser:expr, $separator:pat, $terminator:pat) => {
+        collect_list!(
+            $self,
+            $parser,
+            $separator,
+            $terminator,
+            stringify!($terminator)
+        )
+    };
+
+    ($self:ident, $parser:expr, $separator:pat, $terminator:pat, $string_terminator:expr) => {{
+        let mut list = Vec::new();
+
+        if advance_if_matches!($self, $terminator)?.is_none() {
+            list.push($parser($self)?);
+
+            while advance_if_matches!($self, $separator)?.is_some() {
+                if matches!($self.peek()?.kind, $terminator) {
+                    // A trailing separator is fine in all lists
+                    break;
+                }
+                list.push($parser($self)?);
+            }
+
+            advance_if_matches!($self, $terminator)?.ok_or_else(|| ParseErrorWrapper {
+                error: Expected {
+                    expected: $string_terminator.to_string(),
+                    got: $self.peek().unwrap().clone(),
+                },
+                backtrace: Backtrace::force_capture(),
+            })?;
+        }
+
+        Ok(list)
+    }};
+}
+
 // (self, pattern) -> ParseResult<Option<PatternExtraction>>
 macro_rules! extract_if_kind_matches {
     ($self:expr, $p:path) => {{
@@ -321,8 +372,6 @@ impl Parser {
             .tokens
             .get(self.index)
             .ok_or_else(|| wrap!(ParseError::End("Unexpected end on input".to_string())))?;
-
-        println!("Current token {:#?}", token);
 
         Ok(token)
     }
@@ -377,16 +426,16 @@ impl Parser {
         return_type: String,
         expression: Expression,
     ) -> ParseResult<()> {
-        if self.functions.contains_key(&name) {
-            return err!(FunctionRedefinition(name));
-        }
-
         let func = Function {
             name: name.clone(),
             params,
             return_type,
             expression,
         };
+
+        if self.functions.contains_key(&name) {
+            return err!(FunctionRedefinition(name));
+        }
 
         self.functions.insert(name, func);
 
@@ -466,36 +515,41 @@ impl Parser {
 
         self.expect(TokenKind::LeftBrace)?;
 
-        let mut fields = Vec::new();
+        let fields = collect_list!(
+            self,
+            |this: &mut Self| {
+                let name = this.expect(TokenKind::Identifier)?.lexeme.clone();
+                this.expect(TokenKind::Colon)?;
 
-        while advance_if_matches!(self, TokenKind::RightBrace)?.is_none() {
-            let name = self.expect(TokenKind::Identifier)?.lexeme.clone();
-            self.expect(TokenKind::Colon)?;
+                let type_name = this.expect(TokenKind::Identifier)?.lexeme.clone();
 
-            let type_name = self.expect(TokenKind::Identifier)?.lexeme.clone();
+                this.expect(TokenKind::AssignOp(AssignOp::Equal))?;
 
-            self.expect(TokenKind::AssignOp(AssignOp::Equal))?;
+                let next = this.advance()?;
 
-            let next = self.advance()?;
+                let initializer = match next.kind {
+                    TokenKind::LeftBrace => {
+                        this.expect(TokenKind::RightBrace)?;
 
-            let initializer = match next.kind {
-                TokenKind::LeftBrace => {
-                    self.expect(TokenKind::RightBrace)?;
+                        Value::empty_struct()
+                    }
+                    TokenKind::Value(_) => Value::from_token(next),
+                    _ => unexpected("Value or struct literal", next)?,
+                };
 
-                    Value::empty_struct()
-                }
-                TokenKind::Value(_) => Value::from_token(next),
-                _ => unexpected("Value or struct literal", next)?,
-            };
+                println!("{}: {} = {:?}", name, type_name, initializer);
 
-            self.expect(TokenKind::Comma)?;
+                println!("NEXT: {:?}", this.peek()?);
 
-            fields.push(StructField {
-                name,
-                type_name,
-                initial_value: initializer,
-            })
-        }
+                Ok(StructField {
+                    name,
+                    type_name,
+                    initial_value: initializer,
+                })
+            },
+            TokenKind::Comma,
+            TokenKind::RightBrace
+        )?;
 
         self.define_struct(name, fields)?;
 
@@ -521,17 +575,20 @@ impl Parser {
 
         self.expect(TokenKind::LeftParen)?;
 
-        let mut params = Vec::new();
+        let params = collect_list!(
+            self,
+            |this: &mut Self| {
+                let name = this.expect(TokenKind::Identifier)?.lexeme.clone();
 
-        while advance_if_matches!(self, TokenKind::RightParen)?.is_none() {
-            let name = self.expect(TokenKind::Identifier)?.lexeme.clone();
+                this.expect(TokenKind::Colon)?;
 
-            self.expect(TokenKind::Colon)?;
+                let type_name = this.expect(TokenKind::Identifier)?.lexeme.clone();
 
-            let type_name = self.expect(TokenKind::Identifier)?.lexeme.clone();
-
-            params.push(FunctionParameter { name, type_name });
-        }
+                Ok(FunctionParameter { name, type_name })
+            },
+            TokenKind::Comma,
+            TokenKind::RightParen
+        )?;
 
         self.expect(TokenKind::SmallArrow)?;
 
@@ -670,12 +727,12 @@ impl Parser {
             TokenKind::Identifier => {
                 if advance_if_matches!(self, TokenKind::LeftParen)?.is_some() {
                     // Function call
-                    let mut arguments = Vec::new();
-
-                    while advance_if_matches!(self, TokenKind::RightParen)?.is_none() {
-                        arguments.push(self.expression()?);
-                        advance_if_matches!(self, TokenKind::Comma)?;
-                    }
+                    let arguments = collect_list!(
+                        self,
+                        |this: &mut Self| this.expression(),
+                        TokenKind::Comma,
+                        TokenKind::RightParen
+                    )?;
 
                     Ok(SimpleExpression::FunctionCall {
                         name: next.lexeme,
