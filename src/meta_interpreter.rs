@@ -17,19 +17,27 @@ struct ProgramExecutionLog {
 
 // TODO: Better name that signifies this is between two specific points
 #[derive(Debug)]
-struct ExecutionLogDiff<'a> {
+struct SingleExecutionLog<'a> {
     start: ExecutionDesignator,
     end: ExecutionDesignator,
     log: &'a mut Vec<Statement>,
 }
 
-impl ExecutionLogDiff<'_> {
+impl SingleExecutionLog<'_> {
     fn push(&mut self, statement: Statement) {
         self.log.push(statement);
     }
 
     fn len(&self) -> usize {
         self.log.len()
+    }
+
+    fn last(&self) -> Option<&Statement> {
+        self.log.last()
+    }
+
+    fn first(&self) -> Option<&Statement> {
+        self.log.first()
     }
 
     fn get(&self, index: usize) -> Option<&Statement> {
@@ -79,12 +87,12 @@ impl ProgramExecutionLog {
         &mut self,
         start: ExecutionDesignator,
         end: ExecutionDesignator,
-    ) -> ExecutionLogDiff {
+    ) -> SingleExecutionLog {
         // TODO: work with more than past and present
         assert!([Current, Past].contains(&start));
         assert!([Current, Past].contains(&end));
 
-        ExecutionLogDiff {
+        SingleExecutionLog {
             start,
             end,
             log: &mut self.past_to_current,
@@ -93,27 +101,70 @@ impl ProgramExecutionLog {
 
     // Returns a tree structure that encompasses all possible executions from the start
     // node
-    fn from(&mut self, start: ExecutionDesignator) -> ExecutionTree {
-        // TODO: more than just one
-        assert!(start == Past);
-        ExecutionTree {
-            logs: vec![&mut self.past_to_current],
-        }
+    fn from(&mut self, start: ExecutionDesignator) -> ForwardExecutionTree {
+        let logs = match start {
+            Past => vec![SingleExecutionLog {
+                start: Past,
+                end: Current,
+                log: &mut self.past_to_current,
+            }],
+            Current => Vec::new(),
+        };
+
+        ForwardExecutionTree { logs, start }
+    }
+
+    fn to(&mut self, end: ExecutionDesignator) -> BackwardExecutionTree {
+        // TODO: Fix
+        let logs = match end {
+            Current => vec![SingleExecutionLog {
+                start: Past,
+                end: Current,
+                log: &mut self.past_to_current,
+            }],
+            Past => Vec::new(),
+        };
+
+        BackwardExecutionTree { logs, end }
     }
 }
 
 #[derive(Debug)]
-struct ExecutionTree<'a> {
+struct ForwardExecutionTree<'a> {
+    start: ExecutionDesignator,
     // TODO: The logs should be VecDeq I guess, since I remove from both ends pretty often
-    logs: Vec<&'a mut Vec<Statement>>,
+    logs: Vec<SingleExecutionLog<'a>>,
 }
 
-impl ExecutionTree<'_> {
-    // For each possible execution, remove the first entry
-    fn remove_one(&mut self) {
+impl ForwardExecutionTree<'_> {
+    // For each possible execution starting from start, remove the first entry of the log
+    fn remove_one_if_not_empty(&mut self) {
         for log in &mut self.logs {
+            // If empty, that would mean this step brings the end past the front
+            // That may be something I can deal with later, but for now it's not ok
+            assert!(!log.len() != 0);
+
             log.remove(0);
         }
+        println!("{:#?}", self);
+    }
+}
+
+#[derive(Debug)]
+struct BackwardExecutionTree<'a> {
+    end: ExecutionDesignator,
+    // TODO: Should be some structure where removing from the front is efficient (could just be
+    // reversed vec)
+    logs: Vec<SingleExecutionLog<'a>>,
+}
+
+impl BackwardExecutionTree<'_> {
+    fn push(&mut self, statement: &Statement) {
+        for log in &mut self.logs {
+            log.push(statement.clone());
+        }
+
+        println!("{:#?}", self);
     }
 }
 
@@ -127,7 +178,7 @@ pub struct MetaInterpreter {
     current_program: Program,
     past: Interpreter,
     past_program: Program,
-    max_past_offset: usize,
+    past_offset: usize,
     execution_log: ProgramExecutionLog,
 }
 
@@ -139,7 +190,7 @@ impl MetaInterpreter {
             current_program: program.clone(),
             past: interpreter,
             past_program: program,
-            max_past_offset: 50, // TODO: Magic number
+            past_offset: 3, // TODO: Magic number
             execution_log: ProgramExecutionLog::new(),
         }
     }
@@ -148,6 +199,7 @@ impl MetaInterpreter {
         &mut self,
         execution: ExecutionDesignator,
     ) -> InterpretationResult<Option<Statement>> {
+        println!("Stepping: '{:?}'", execution);
         // TODO: Add alternative executions here
         let result = match execution {
             Past => self.past.step(&self.past_program),
@@ -156,13 +208,15 @@ impl MetaInterpreter {
 
         match result {
             Ok(Some(good)) => {
-                self.execution_log.to(execution).push(good);
-                self.execution_log.from(execution).remove_one();
+                self.execution_log.to(execution).push(&good);
+
+                self.execution_log.from(execution).remove_one_if_not_empty();
 
                 Ok(Some(good))
             }
             Ok(None) => {
-                todo!("Handle end of execution")
+                println!("Yay, '{execution:?}' finished the program!");
+                Ok(None)
             }
             Err(err) => {
                 self.handle_error(execution, err);
@@ -175,24 +229,23 @@ impl MetaInterpreter {
     pub fn step(&mut self) -> InterpretationResult<Option<Statement>> {
         // TODO: Should this return anything?
         // TODO: Execution log
-
-        if self.execution_log.between(Past, Current).len() < self.max_past_offset {
-            let past_stmt = self.step_one(Past)?;
-            assert_eq!(
-                self.execution_log.between(Past, Current).get(0),
-                past_stmt.as_ref()
-            );
-            self.execution_log.between(Past, Current).remove(0);
-        }
-
         let current_stmt = self.step_one(Current)?;
 
-        if let Some(current_stmt) = &current_stmt {
-            self.execution_log
-                .between(Past, Current)
-                .push(current_stmt.clone())
+        if self.execution_log.between(Past, Current).len() > self.past_offset {
+            let first_of_log = self.execution_log.between(Past, Current).first().cloned();
+            let past_stmt = self.step_one(Past)?;
+            if past_stmt.is_some() {
+                assert_eq!(first_of_log, past_stmt);
+            }
         }
-        // TODO: Otherwise, make sure we don't just go on
+
+        // TODO: This doesn't work at the end
+        if current_stmt.is_some() {
+            assert_eq!(
+                self.execution_log.between(Past, Current).last(),
+                current_stmt.as_ref()
+            );
+        }
 
         Ok(current_stmt)
     }

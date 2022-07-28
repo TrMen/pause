@@ -85,6 +85,10 @@ impl Interpreter {
         // TODO: Make this more sophisticated than just "steps in main procedure". Prolly the whole
         // idea of stepping doesn't really make sense, and I'll just tell the interpreter to run
         // for a bit, then it comes back with a list of statements it ran, and optionally an error.
+        if self.main_index >= program.main.body.len() {
+            return Ok(None);
+        }
+
         let executed_statement = &program.main.body[self.main_index];
 
         self.main_index += 1;

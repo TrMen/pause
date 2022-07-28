@@ -33,7 +33,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match meta.step()? {
             Some(_) => continue,
             None => {
-                println!("Done!\n{}", meta);
+                println!("{}", meta);
+                println!("\n\nDone!");
                 break;
             }
         }

@@ -49,6 +49,12 @@ function plus_one (i: u64) -> u64 {
 procedure main {
     .num = 2;
 
+    .num = 3;
+    .num = 4;
+    .num = 5;
+    .num = 6;
+    .num = 7;
+    .num = 4 + 4;
 //    ..store;
 //    ..increment;
 //    !increment_good;
