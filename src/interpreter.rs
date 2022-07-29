@@ -1,11 +1,10 @@
-use std::collections::HashMap;
-
 use thiserror::Error;
 
 use crate::{
     lexer::{AssignOp, ExecutionDesignator},
     parser::{
-        AccessPath, Expression, Indirection, Program, SimpleExpression, Statement, Struct, Value,
+        AccessPath, EvaluatedAccessPath, EvaluatedIndirection, Expression, Indirection, Program,
+        SimpleExpression, Statement, Struct, Value,
     },
 };
 
@@ -44,6 +43,14 @@ pub enum InterpretationError {
         expected: String,
         actual: String,
     }, // TODO: Should be some enum or int identifying types, rather than a string
+    #[error("Incorrect argument type for '{param_name}: {expected_type}' in call to function '{func_name}'. Argument is '{actual_val:#?}' of type '{actual_type}'")]
+    FunctionArgumentTypeMissmatch {
+        func_name: String,
+        param_name: String,
+        expected_type: String,
+        actual_val: Value,
+        actual_type: String,
+    }, //
     #[error("Incorrect number of arguments for call to function '{name}'. Expected '{expected}' arguments, got '{actual}'.")]
     MissmatchedArity {
         name: String,
@@ -55,7 +62,7 @@ pub enum InterpretationError {
     #[error("Trying to access value '{value:#?}' as if it were an array.")]
     ArrayTypeError { value: Value },
     #[error("Out of bounds array access on '{:#?}'. Index: '{index}'")]
-    OutOfBoundsArrayAccess { array: Value, index: u64 },
+    OutOfBoundsArrayAccess { array: Value, index: usize },
 }
 
 use InterpretationError::*;
@@ -63,10 +70,42 @@ use InterpretationError::*;
 pub(crate) type InterpretationResult<T> = Result<T, InterpretationError>;
 
 #[derive(Clone, Debug)]
-struct Binding {
+pub struct Binding {
     name: String,
     type_name: String,
     value: Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct Scope {
+    bindings: Vec<Binding>,
+    outer: Option<Box<Scope>>,
+}
+
+// TODO: Add buildins to global scope
+static GLOBAL_SCOPE: Scope = Scope {
+    outer: None,
+    bindings: Vec::new(),
+};
+
+// TODO: Make scope a lifetime thing to avoid having deepcopy outer
+impl Scope {
+    pub fn inner_with_bindings(&self, bindings: Vec<Binding>) -> Self {
+        Self {
+            outer: Some(Box::new(self.clone())),
+            bindings,
+        }
+    }
+
+    pub fn find_binding(&self, name: &str) -> InterpretationResult<&Binding> {
+        let outer_find = || self.outer.as_ref().map(|outer| outer.find_binding(name));
+
+        self.bindings
+            .iter()
+            .find(|binding| binding.name == name)
+            .map_or_else(outer_find, |b| Some(Ok(b)))
+            .ok_or_else(|| InterpretationError::UndefinedBinding(name.to_string()))?
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -74,15 +113,12 @@ pub(crate) struct Interpreter {
     pub state: Struct,
 
     main_index: usize,
-
-    bindings: HashMap<String, Binding>,
 }
 
 impl Interpreter {
     pub fn new(state: Struct) -> Self {
         Self {
             state,
-            bindings: HashMap::new(),
             main_index: 0,
         }
     }
@@ -101,7 +137,7 @@ impl Interpreter {
 
         self.main_index += 1;
 
-        self.statement(program, executed_statement)?;
+        self.statement(&GLOBAL_SCOPE, program, executed_statement)?;
 
         Ok(Some(executed_statement.clone()))
     }
@@ -111,8 +147,9 @@ impl Interpreter {
         program: &Program,
         stmts: impl Iterator<Item = &'a Statement>,
     ) -> InterpretationResult<()> {
+        // TODO: Allow more than just global scope
         for stmt in stmts {
-            self.statement(program, stmt)?;
+            self.statement(&GLOBAL_SCOPE, program, stmt)?;
         }
 
         Ok(())
@@ -121,32 +158,41 @@ impl Interpreter {
         // or return so far
     }
 
-    fn statement(&mut self, program: &Program, stmt: &Statement) -> InterpretationResult<()> {
+    fn statement(
+        &mut self,
+        scope: &Scope,
+        program: &Program,
+        stmt: &Statement,
+    ) -> InterpretationResult<()> {
         match stmt {
-            Statement::AssertionCall { name } => self.call_assertion(program, name),
+            Statement::AssertionCall { name } => self.call_assertion(scope, program, name),
             Statement::StateAssignment {
                 lhs,
                 assign_op,
                 rhs,
-            } => self.state_assignment(program, lhs, assign_op, rhs),
-            Statement::ProcedureCall { name } => self.procedure_call(program, name),
+            } => self.state_assignment(scope, program, lhs, assign_op, rhs),
+            Statement::ProcedureCall { name } => self.procedure_call(scope, program, name),
             Statement::Expression(expression) => {
-                let _expr_result = self.evaluate_expression(program, expression)?;
+                let _expr_result = evaluate_expression(scope, &self.state, program, expression)?;
                 // TODO: Check if result was marked must-use (or is that even a thing?)
                 Ok(())
             }
         }
     }
 
-    fn call_assertion(&mut self, program: &Program, name: &str) -> InterpretationResult<()> {
+    fn call_assertion(
+        &mut self,
+        scope: &Scope,
+        program: &Program,
+        name: &str,
+    ) -> InterpretationResult<()> {
         let assertion = program
             .assertions
             .get(name)
             .ok_or_else(|| UnknownAssertion(name.to_string()))?;
 
-        let passed = self
-            .evaluate_expression(program, &assertion.predicate)?
-            .is_truthy()?;
+        let passed =
+            evaluate_expression(scope, &self.state, program, &assertion.predicate)?.is_truthy()?;
 
         if !passed {
             return Err(AssertionFailed(name.to_string()));
@@ -157,42 +203,29 @@ impl Interpreter {
 
     fn state_assignment(
         &mut self,
+        scope: &Scope,
         program: &Program,
         lhs: &AccessPath,
         assign_op: &AssignOp,
         rhs: &Expression,
     ) -> InterpretationResult<()> {
-        let rhs_value = self.evaluate_expression(program, rhs)?;
+        let rhs_value = evaluate_expression(scope, &self.state, program, rhs)?;
 
-        let state_field = self
+        let path = evaluate_path(scope, lhs, &self.state, program)?;
+
+        let field = self
             .state
-            .fields
-            .iter_mut()
-            .find(|f| f.name == lhs.name)
-            .ok_or_else(|| UndefinedStructField {
-                structure: "state".to_string(),
-                field_name: lhs.name.clone(),
-            })?;
+            .get_field_mut(&path.name)?
+            .value
+            .access_path_mut(&path)?;
 
-        let mut lhs_value = &mut state_field.initial_value;
-
-        for indirection in &lhs.indirections {
-            match indirection {
-                crate::parser::Indirection::Field(_) => todo!("Struct field access"),
-                crate::parser::Indirection::Subscript(index) => {
-                    let index = self.evaluate_expression(program, &index)?;
-                    lhs_value = self.access_array_mut(lhs_value, index)?
-                }
-            }
-        }
-
-        //        let lhs_value =
-        //           self.access_indirections(program, &mut state_field.initial_value, &lhs.indirections)?;
-
-        if rhs_value.type_name() != state_field.type_name {
+        // TODO: This isn't quite right. It checks against whatever is currently in the field,
+        // which is fine since it always checks. But this doesn't work right for arrays. Should
+        // check against the declared type of the struct field
+        if rhs_value.type_name() != field.type_name() {
             return Err(AssignmentTypeMissmatch {
                 value: rhs_value.clone(),
-                expected: state_field.type_name.clone(),
+                expected: field.type_name().to_string(),
                 actual: rhs_value.type_name().to_string(),
             });
         }
@@ -200,10 +233,10 @@ impl Interpreter {
         match assign_op {
             // TODO: This should not use the Struct strucutre, since that's for source code
             // definitions.
-            AssignOp::Equal => *lhs_value = rhs_value,
+            AssignOp::Equal => *field = rhs_value,
             AssignOp::PlusEqual => {
-                if let (Value::Number(lhs), Value::Number(rhs)) = (lhs_value, rhs_value) {
-                    *lhs += rhs;
+                if let (Value::Number(field), Value::Number(rhs)) = (field, rhs_value) {
+                    *field += rhs;
                 } else {
                     todo!("Invalid assignment");
                 }
@@ -213,252 +246,12 @@ impl Interpreter {
         Ok(())
     }
 
-    // TODO: This can be pub if expressions have no side effects. They can right now through
-    // procedure calls
-    fn evaluate_expression(
-        &self,
-        program: &Program,
-        expression: &Expression,
-    ) -> InterpretationResult<Value> {
-        match expression {
-            Expression::Binary { lhs, op, rhs } => {
-                let lhs = self.evaluate_simple_expression(program, lhs)?;
-
-                let rhs = self.evaluate_expression(program, rhs)?;
-
-                match op {
-                    crate::lexer::BinaryOp::Plus => {
-                        Ok(Value::Number(lhs.as_number() + rhs.as_number()))
-                    }
-                    crate::lexer::BinaryOp::Minus => {
-                        Ok(Value::Number(lhs.as_number() - rhs.as_number()))
-                    }
-                    crate::lexer::BinaryOp::EqualEqual => Ok(Value::Bool(lhs == rhs)),
-                }
-            }
-            Expression::Simple(simple) => self.evaluate_simple_expression(program, simple),
-        }
-    }
-
-    fn evaluate_simple_expression(
-        &self,
-        program: &Program,
-        simple: &SimpleExpression,
-    ) -> InterpretationResult<Value> {
-        match simple {
-            SimpleExpression::Value(value) => Ok(value.clone()),
-            SimpleExpression::StateAccess(access_path) => self.state_access(access_path),
-            SimpleExpression::FunctionCall { name, arguments } => {
-                self.evaluate_function(program, name, arguments)
-            }
-            SimpleExpression::ExecutionAccess { execution, path } => todo!(),
-            SimpleExpression::BindingAccess(path) => self.binding_access(program, path),
-            SimpleExpression::ArrayLiteral(array) => {
-                let mut evaluated_array = Vec::new();
-                for expression in array {
-                    evaluated_array.push(self.evaluate_expression(program, expression)?);
-                }
-
-                Ok(Value::Array(evaluated_array))
-            }
-            SimpleExpression::ArrayAccess { target, index } => {
-                let target = self.evaluate_expression(program, target)?;
-                let index = self.evaluate_expression(program, index)?;
-
-                self.access_array(&target, index).cloned()
-            }
-        }
-    }
-
-    fn access_array_mut(
-        &self,
-        array: &mut Value,
-        index: Value,
-    ) -> InterpretationResult<&mut Value> {
-        if let Value::Number(index) = &index {
-            if let Value::Array(array) = array {
-                Ok(array
-                    .get_mut(*index as usize)
-                    .ok_or_else(|| OutOfBoundsArrayAccess {
-                        array: Value::Array(array.clone()),
-                        index: *index,
-                    })?)
-            } else {
-                Err(ArrayTypeError {
-                    value: array.clone(),
-                })
-            }
-        } else {
-            Err(ArrayIndexTypeError {
-                value: index.clone(),
-                type_name: index.type_name().to_string(),
-            })
-        }
-    }
-
-    // TODO: Don't replicate these so much
-    fn access_array(&self, array: &Value, index: Value) -> InterpretationResult<&Value> {
-        if let Value::Number(index) = &index {
-            if let Value::Array(array) = &array {
-                Ok(array
-                    .get_mut(*index as usize)
-                    .ok_or_else(|| OutOfBoundsArrayAccess {
-                        array: Value::Array(array.clone()),
-                        index: *index,
-                    })?)
-            } else {
-                Err(ArrayTypeError {
-                    value: array.clone(),
-                })
-            }
-        } else {
-            Err(ArrayIndexTypeError {
-                value: index.clone(),
-                type_name: index.type_name().to_string(),
-            })
-        }
-    }
-
-    fn state_access(&self, path: &AccessPath) -> InterpretationResult<Value> {
-        let field = self
-            .state
-            .fields
-            .iter()
-            .find(|field| field.name == path.name)
-            .ok_or_else(|| UndefinedStructField {
-                structure: "state".to_string(),
-                field_name: path.name.clone(),
-            })?;
-
-        // TODO: Initial value shouldn't be here
-        let value = field.initial_value.clone();
-
-        if !path.indirections.is_empty() {
-            todo!("Struct access");
-        }
-
-        Ok(value)
-    }
-
-    fn binding_access(&self, program: &Program, path: &AccessPath) -> InterpretationResult<Value> {
-        let binding = self
-            .bindings
-            .get(&path.name)
-            .ok_or_else(|| UndefinedBinding(path.name.clone()))?;
-
-        let value = binding.value.clone();
-
-        let value = self.access_indirections(program, &mut value, &path.indirections)?;
-
-        Ok(value.clone())
-    }
-
-    fn access_indirections(
-        &self,
-        program: &Program,
-        mut value: &Value,
-        indirections: &Vec<Indirection>,
-    ) -> InterpretationResult<&Value> {
-        for indirection in indirections {
-            match indirection {
-                crate::parser::Indirection::Field(_) => todo!("Struct field access"),
-                crate::parser::Indirection::Subscript(index) => {
-                    let index = self.evaluate_expression(program, &index)?;
-                    value = self.access_array(&value, index)?
-                }
-            }
-        }
-
-        Ok(value)
-    }
-
-    fn access_indirections_mut(
+    fn procedure_call(
         &mut self,
-        program: &Program,
-        mut value: &mut Value,
-        indirections: &Vec<Indirection>,
-    ) -> InterpretationResult<&mut Value> {
-        for indirection in indirections {
-            match indirection {
-                crate::parser::Indirection::Field(_) => todo!("Struct field access"),
-                crate::parser::Indirection::Subscript(index) => {
-                    let index = self.evaluate_expression(program, &index)?;
-                    value = self.access_array_mut(&mut value, index)?
-                }
-            }
-        }
-
-        Ok(value)
-    }
-
-    fn evaluate_function(
-        &self,
+        scope: &Scope,
         program: &Program,
         name: &str,
-        arguments: &Vec<Expression>,
-    ) -> InterpretationResult<Value> {
-        let function = program
-            .functions
-            .get(name)
-            .ok_or_else(|| UnknownFunction(name.to_string()))?;
-
-        if function.params.len() != arguments.len() {
-            return Err(MissmatchedArity {
-                name: name.to_string(),
-                expected: function.params.len(),
-                actual: arguments.len(),
-            });
-        }
-
-        for (parameter, argument) in function.params.iter().zip(arguments.iter()) {
-            let value = self.evaluate_expression(program, argument)?;
-            self.define_binding(parameter.name.clone(), parameter.type_name.clone(), value)?;
-        }
-
-        let value = self.evaluate_expression(program, &function.expression)?;
-
-        // TODO: remove this runtime type checking from here
-        if value.type_name() != function.return_type {
-            return Err(ReturnTypeMissmatch {
-                expected: function.return_type.clone(),
-                actual: value.type_name().to_string(),
-            });
-        }
-
-        for parameter in function.params.iter() {
-            self.delete_binding(&parameter.name);
-        }
-
-        Ok(value)
-    }
-
-    fn define_binding(
-        &mut self,
-        name: String,
-        type_name: String,
-        value: Value,
     ) -> InterpretationResult<()> {
-        if self.bindings.contains_key(&name) {
-            return Err(BindingRedefinition(name));
-        }
-
-        self.bindings.insert(
-            name.clone(),
-            Binding {
-                name,
-                type_name,
-                value,
-            },
-        );
-
-        Ok(())
-    }
-
-    fn delete_binding(&mut self, name: &str) {
-        self.bindings.remove(name);
-    }
-
-    fn procedure_call(&mut self, program: &Program, name: &str) -> InterpretationResult<()> {
         let procedure = program
             .procedures
             .get(name)
@@ -467,36 +260,203 @@ impl Interpreter {
         for stmt in &procedure.body {
             // TODO: Do procedures ever return something? I'm leaning towards no. But if yes, I
             // need a return stmt or implicit last-expr-returns and I need to check that here.
-            self.statement(program, stmt)?;
+            self.statement(scope, program, stmt)?;
         }
 
         Ok(())
     }
 }
 
-//    pub fn set(&mut self, idx: usize, new: ProgramEntry) -> FunctionResult<()> {
-//        let existing = self
-//            .entries
-//            .get_mut(idx)
-//            .ok_or(FunctionFailure::OutOfProgramBounds(idx))?;
-//
-//        *existing = new;
-//
-//        Ok(())
-//    }
-//
-//    pub fn push_fn(&mut self, fn_name: &str) {
-//        self.entries
-//            .push(ProgramEntry::Function(fn_name.to_string()));
-//    }
-//
-//    pub fn push_assertion(&mut self, assertion_name: &str) {
-//        self.entries
-//            .push(ProgramEntry::Assertion(assertion_name.to_string()));
-//    }
-//
-//    // TODO: This returning FunctionResult is an indicator that might not be named well.
-//    pub fn get(&self, idx: usize) -> &ProgramEntry {
-//        // Should only be used from TrackedState, so the function idx must exist.
-//        &self.entries[idx]
-//    }
+pub fn evaluate_path(
+    scope: &Scope,
+    path: &AccessPath,
+    state: &Struct,
+    program: &Program,
+) -> InterpretationResult<EvaluatedAccessPath> {
+    let mut eval_path = EvaluatedAccessPath {
+        name: path.name.clone(),
+        indirections: Vec::new(),
+    };
+
+    for indirection in &path.indirections {
+        match indirection {
+            Indirection::Field(_) => todo!("Do I need to do anything here? "),
+            Indirection::Subscript(index_expr) => {
+                let evaluated = evaluate_expression(scope, state, program, index_expr)?;
+                if let Value::Number(index) = evaluated {
+                    eval_path
+                        .indirections
+                        .push(EvaluatedIndirection::Subscript(index.try_into().unwrap()));
+                } else {
+                    return Err(ArrayIndexTypeError {
+                        value: evaluated.clone(),
+                        type_name: evaluated.type_name().to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(eval_path)
+}
+
+// TODO: This can be pub if expressions have no side effects. They can right now through
+// procedure calls
+pub fn evaluate_expression(
+    scope: &Scope,
+    state: &Struct,
+    program: &Program,
+    expression: &Expression,
+) -> InterpretationResult<Value> {
+    match expression {
+        Expression::Binary { lhs, op, rhs } => {
+            let lhs = evaluate_simple_expression(scope, state, program, lhs)?;
+
+            let rhs = evaluate_expression(scope, state, program, rhs)?;
+
+            match op {
+                crate::lexer::BinaryOp::Plus => {
+                    Ok(Value::Number(lhs.as_number() + rhs.as_number()))
+                }
+                crate::lexer::BinaryOp::Minus => {
+                    Ok(Value::Number(lhs.as_number() - rhs.as_number()))
+                }
+                crate::lexer::BinaryOp::EqualEqual => Ok(Value::Bool(lhs == rhs)),
+            }
+        }
+        Expression::Simple(simple) => evaluate_simple_expression(scope, state, program, simple),
+    }
+}
+
+pub fn evaluate_simple_expression(
+    scope: &Scope,
+    state: &Struct,
+    program: &Program,
+    simple: &SimpleExpression,
+) -> InterpretationResult<Value> {
+    match simple {
+        SimpleExpression::Value(value) => Ok(value.clone()),
+        SimpleExpression::StateAccess(access_path) => {
+            struct_field_access(scope, state, program, access_path).cloned()
+        }
+        SimpleExpression::FunctionCall { name, arguments } => {
+            evaluate_function(scope, state, program, name, arguments)
+        }
+        SimpleExpression::ExecutionAccess { execution, path } => todo!(),
+        SimpleExpression::BindingAccess(path) => {
+            let path = evaluate_path(scope, path, state, program)?;
+
+            scope
+                .find_binding(&path.name)?
+                .value
+                .access_path(&path)
+                .cloned()
+        }
+        SimpleExpression::ArrayLiteral(array) => {
+            let mut evaluated_array = Vec::new();
+            for expression in array {
+                evaluated_array.push(evaluate_expression(scope, state, program, expression)?);
+            }
+
+            Ok(Value::Array(evaluated_array))
+        }
+        // TODO: This should just be a path access. But have to parse that correctly
+        SimpleExpression::ArrayAccess { target, index } => {
+            let target = evaluate_expression(scope, state, program, target)?;
+            let index_val = evaluate_expression(scope, state, program, index)?;
+
+            if let Value::Number(index) = index_val {
+                Ok(target.access_array(index.try_into().unwrap())?.clone())
+            } else {
+                Err(ArrayIndexTypeError {
+                    value: index_val.clone(),
+                    type_name: index_val.type_name().to_string(),
+                })
+            }
+        }
+    }
+}
+
+pub fn struct_field_access<'a>(
+    scope: &Scope,
+    structure: &'a Struct,
+    program: &Program,
+    path: &AccessPath,
+) -> InterpretationResult<&'a Value> {
+    structure
+        .get_field(&path.name)?
+        .value
+        .access_path(&evaluate_path(scope, path, structure, program)?)
+}
+
+pub fn struct_field_access_mut<'a>(
+    scope: &Scope,
+    structure: &'a mut Struct,
+    program: &Program,
+    path: &AccessPath,
+) -> InterpretationResult<&'a Value> {
+    let path = evaluate_path(scope, path, structure, program)?;
+
+    structure
+        .get_field_mut(&path.name)?
+        .value
+        .access_path(&path)
+}
+
+pub fn evaluate_function(
+    scope: &Scope,
+    state: &Struct,
+    program: &Program,
+    name: &str,
+    arguments: &Vec<Expression>,
+) -> InterpretationResult<Value> {
+    let function = program
+        .functions
+        .get(name)
+        .ok_or_else(|| UnknownFunction(name.to_string()))?;
+
+    if function.params.len() != arguments.len() {
+        return Err(MissmatchedArity {
+            name: name.to_string(),
+            expected: function.params.len(),
+            actual: arguments.len(),
+        });
+    }
+
+    let bindings = function
+        .params
+        .iter()
+        .zip(arguments.iter())
+        .map(|(param, arg)| -> InterpretationResult<Binding> {
+            let arg = evaluate_expression(scope, state, program, arg)?;
+            if param.type_name != arg.type_name() {
+                return Err(FunctionArgumentTypeMissmatch {
+                    func_name: function.name.to_string(),
+                    param_name: param.name.clone(),
+                    expected_type: param.type_name.clone(),
+                    actual_type: arg.type_name().to_string(),
+                    actual_val: arg,
+                });
+            }
+            Ok(Binding {
+                name: param.name.clone(),
+                type_name: param.type_name.clone(),
+                value: arg,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let inner_scope = scope.inner_with_bindings(bindings);
+
+    let function_value = evaluate_expression(&inner_scope, state, program, &function.expression)?;
+
+    // TODO: remove this runtime type checking from here
+    if function_value.type_name() != function.return_type {
+        return Err(ReturnTypeMissmatch {
+            expected: function.return_type.clone(),
+            actual: function_value.type_name().to_string(),
+        });
+    }
+
+    Ok(function_value)
+}

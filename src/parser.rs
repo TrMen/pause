@@ -62,6 +62,73 @@ impl Value {
             Value::Array(_) => "Array",
         }
     }
+
+    // TODO: Don't replicate these so much
+    pub fn access_array(&self, index: usize) -> InterpretationResult<&Value> {
+        if let Value::Array(array) = self {
+            Ok(array
+                .get(index)
+                .ok_or_else(|| InterpretationError::OutOfBoundsArrayAccess {
+                    array: Value::Array(array.clone()),
+                    index,
+                })?)
+        } else {
+            Err(InterpretationError::ArrayTypeError {
+                value: self.clone(),
+            })
+        }
+    }
+
+    pub fn access_array_mut(&mut self, index: usize) -> InterpretationResult<&mut Value> {
+        // TODO: This should be possible to write without cloning up here
+        let clone = self.clone();
+
+        if let Value::Array(array) = self {
+            Ok(array
+                .get_mut(index)
+                .ok_or_else(|| InterpretationError::OutOfBoundsArrayAccess {
+                    array: clone,
+                    index,
+                })?)
+        } else {
+            Err(InterpretationError::ArrayTypeError {
+                value: self.clone(),
+            })
+        }
+    }
+
+    pub fn access_path(&self, path: &EvaluatedAccessPath) -> InterpretationResult<&Value> {
+        let mut value = self;
+
+        for indirection in &path.indirections {
+            match indirection {
+                EvaluatedIndirection::Field(_) => todo!("Struct field access"),
+                EvaluatedIndirection::Subscript(index) => {
+                    value = value.access_array(*index)?;
+                }
+            }
+        }
+
+        Ok(value)
+    }
+
+    pub fn access_path_mut(
+        &mut self,
+        path: &EvaluatedAccessPath,
+    ) -> InterpretationResult<&mut Value> {
+        let mut value = self;
+
+        for indirection in &path.indirections {
+            match indirection {
+                EvaluatedIndirection::Field(_) => todo!("Struct field access"),
+                EvaluatedIndirection::Subscript(index) => {
+                    value = value.access_array_mut(*index)?;
+                }
+            }
+        }
+
+        Ok(value)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +136,18 @@ pub enum Indirection {
     Field(String),
     Subscript(Box<Expression>),
     // TODO: Add function calls
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EvaluatedIndirection {
+    Field(String),
+    Subscript(usize),
+    // TODO: Add function calls
+}
+
+pub struct EvaluatedAccessPath {
+    pub name: String,
+    pub indirections: Vec<EvaluatedIndirection>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -134,12 +213,35 @@ pub struct StructField {
     pub name: String,
     pub type_name: String,
     pub initial_value: Value, //  TODO: Make clearer that this is just initial, nothing you can actually change at runtime
+    pub value: Value, //  TODO: Make clearer that this is just initial, nothing you can actually change at runtime
 }
 
 #[derive(Debug, Clone)]
 pub struct Struct {
     pub name: String,
     pub fields: Vec<StructField>,
+}
+
+impl Struct {
+    pub fn get_field(&self, name: &str) -> InterpretationResult<&StructField> {
+        self.fields
+            .iter()
+            .find(|field| field.name == name)
+            .ok_or_else(|| InterpretationError::UndefinedStructField {
+                structure: self.name.clone(),
+                field_name: name.to_string(),
+            })
+    }
+
+    pub fn get_field_mut(&mut self, name: &str) -> InterpretationResult<&mut StructField> {
+        self.fields
+            .iter_mut()
+            .find(|field| field.name == name)
+            .ok_or_else(|| InterpretationError::UndefinedStructField {
+                structure: "state".to_string(),
+                field_name: name.to_string(),
+            })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -561,7 +663,8 @@ impl Parser {
                 Ok(StructField {
                     name,
                     type_name,
-                    initial_value: initializer,
+                    initial_value: initializer.clone(),
+                    value: initializer,
                 })
             },
             TokenKind::Comma,
