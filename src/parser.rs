@@ -5,19 +5,30 @@ use std::{backtrace::Backtrace, collections::HashMap};
 use crate::{
     interpreter::{InterpretationError, InterpretationResult},
     lexer::{AssignOp, BinaryOp, ExecutionDesignator, Token, TokenKind, ValueKind},
+    typechecker::{BuildinType, Type},
 };
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Value {
+pub enum ValueLiteral {
     String(String),
     Number(u64),
     Bool(bool),
     // TODO: The fields of a struct literal aren't really typed, right?
-    StructLiteral { fields: Vec<StructField> },
-    Array(Vec<Value>),
+    Struct(Struct),
+    Array(Vec<ValueLiteral>),
 }
 
-impl Value {
+impl ValueLiteral {
+    pub fn typ(&self) -> Type {
+        match self {
+            ValueLiteral::String(_) => Type::Buildin(BuildinType::String),
+            ValueLiteral::Number(_) => Type::Buildin(BuildinType::U64),
+            ValueLiteral::Bool(_) => Type::Buildin(BuildinType::Bool),
+            ValueLiteral::Struct(_) => todo!(),
+            ValueLiteral::Array(_) => todo!(),
+        }
+    }
+
     pub fn from_token(token: &Token) -> Self {
         match token.kind {
             TokenKind::Value(ValueKind::String) => Self::String(token.lexeme.clone()),
@@ -28,14 +39,17 @@ impl Value {
         }
     }
 
-    pub fn empty_struct() -> Value {
-        Value::StructLiteral { fields: Vec::new() }
+    pub fn empty_struct() -> ValueLiteral {
+        ValueLiteral::Struct(Struct {
+            name: "<empty_struct>".to_string(),
+            fields: Vec::new(),
+        })
     }
 
     pub fn as_number(&self) -> u64 {
         // TODO: Get rid of all this for proper typing
         match self {
-            Value::Number(num) => *num,
+            ValueLiteral::Number(num) => *num,
             _ => todo!("Not a number"),
         }
     }
@@ -45,31 +59,31 @@ impl Value {
         // the 'Value' enum at all
 
         match self {
-            Value::Bool(boolean) => Ok(*boolean),
+            ValueLiteral::Bool(boolean) => Ok(*boolean),
             _ => Err(InterpretationError::InvalidTypeConversion {
                 from: self.type_name().to_string(),
-                to: Value::Bool(true).type_name().to_string(),
+                to: ValueLiteral::Bool(true).type_name().to_string(),
             }),
         }
     }
 
     pub fn type_name(&self) -> &str {
         match self {
-            Value::String(_) => "string",
-            Value::Number(_) => "u64",
-            Value::Bool(_) => "bool",
-            Value::StructLiteral { .. } => "Struct",
-            Value::Array(_) => "Array",
+            ValueLiteral::String(_) => "string",
+            ValueLiteral::Number(_) => "u64",
+            ValueLiteral::Bool(_) => "bool",
+            ValueLiteral::Struct { .. } => "Struct",
+            ValueLiteral::Array(_) => "Array",
         }
     }
 
     // TODO: Don't replicate these so much
-    pub fn access_array(&self, index: usize) -> InterpretationResult<&Value> {
-        if let Value::Array(array) = self {
+    pub fn access_array(&self, index: usize) -> InterpretationResult<&ValueLiteral> {
+        if let ValueLiteral::Array(array) = self {
             Ok(array
                 .get(index)
                 .ok_or_else(|| InterpretationError::OutOfBoundsArrayAccess {
-                    array: Value::Array(array.clone()),
+                    array: ValueLiteral::Array(array.clone()),
                     index,
                 })?)
         } else {
@@ -79,14 +93,14 @@ impl Value {
         }
     }
 
-    pub fn access_array_mut(&mut self, index: usize) -> InterpretationResult<&mut Value> {
+    pub fn access_array_mut(&mut self, index: usize) -> InterpretationResult<&mut ValueLiteral> {
         // TODO: This should be possible to write without cloning up here
         let clone = self.clone();
 
-        if let Value::Array(array) = self {
+        if let ValueLiteral::Array(array) = self {
             Ok(array
                 .get_mut(index)
-                .ok_or_else(|| InterpretationError::OutOfBoundsArrayAccess {
+                .ok_or(InterpretationError::OutOfBoundsArrayAccess {
                     array: clone,
                     index,
                 })?)
@@ -97,12 +111,36 @@ impl Value {
         }
     }
 
-    pub fn access_path(&self, path: &EvaluatedAccessPath) -> InterpretationResult<&Value> {
+    // TODO: Don't replicate these so much
+    pub fn access_field(&self, name: &str) -> InterpretationResult<&ValueLiteral> {
+        if let ValueLiteral::Struct(structure) = self {
+            structure.get_field(name).map(|field| &field.value)
+        } else {
+            Err(InterpretationError::StructTypeError {
+                value: self.clone(),
+            })
+        }
+    }
+
+    // TODO: Don't replicate these so much
+    pub fn access_field_mut(&mut self, name: &str) -> InterpretationResult<&mut ValueLiteral> {
+        if let ValueLiteral::Struct(structure) = self {
+            structure.get_field_mut(name).map(|field| &mut field.value)
+        } else {
+            Err(InterpretationError::StructTypeError {
+                value: self.clone(),
+            })
+        }
+    }
+
+    pub fn access_path(&self, path: &EvaluatedAccessPath) -> InterpretationResult<&ValueLiteral> {
         let mut value = self;
 
         for indirection in &path.indirections {
             match indirection {
-                EvaluatedIndirection::Field(_) => todo!("Struct field access"),
+                EvaluatedIndirection::Field(field_name) => {
+                    value = value.access_field(field_name)?;
+                }
                 EvaluatedIndirection::Subscript(index) => {
                     value = value.access_array(*index)?;
                 }
@@ -115,12 +153,14 @@ impl Value {
     pub fn access_path_mut(
         &mut self,
         path: &EvaluatedAccessPath,
-    ) -> InterpretationResult<&mut Value> {
+    ) -> InterpretationResult<&mut ValueLiteral> {
         let mut value = self;
 
         for indirection in &path.indirections {
             match indirection {
-                EvaluatedIndirection::Field(_) => todo!("Struct field access"),
+                EvaluatedIndirection::Field(field_name) => {
+                    value = value.access_field_mut(field_name)?;
+                }
                 EvaluatedIndirection::Subscript(index) => {
                     value = value.access_array_mut(*index)?;
                 }
@@ -138,13 +178,14 @@ pub enum Indirection {
     // TODO: Add function calls
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvaluatedIndirection {
     Field(String),
     Subscript(usize),
     // TODO: Add function calls
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvaluatedAccessPath {
     pub name: String,
     pub indirections: Vec<EvaluatedIndirection>,
@@ -158,7 +199,7 @@ pub struct AccessPath {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SimpleExpression {
-    Value(Value),
+    Value(ValueLiteral),
     ArrayLiteral(Vec<Expression>),
     ArrayAccess {
         target: Box<Expression>,
@@ -212,11 +253,11 @@ pub struct Procedure {
 pub struct StructField {
     pub name: String,
     pub type_name: String,
-    pub initial_value: Value, //  TODO: Make clearer that this is just initial, nothing you can actually change at runtime
-    pub value: Value, //  TODO: Make clearer that this is just initial, nothing you can actually change at runtime
+    pub initial_value: ValueLiteral, //  TODO: Make clearer that this is just initial, nothing you can actually change at runtime
+    pub value: ValueLiteral, //  TODO: Make clearer that this is just initial, nothing you can actually change at runtime
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Struct {
     pub name: String,
     pub fields: Vec<StructField>,
@@ -238,7 +279,7 @@ impl Struct {
             .iter_mut()
             .find(|field| field.name == name)
             .ok_or_else(|| InterpretationError::UndefinedStructField {
-                structure: "state".to_string(),
+                structure: self.name.clone(),
                 field_name: name.to_string(),
             })
     }
@@ -645,14 +686,14 @@ impl Parser {
                     TokenKind::LeftBrace => {
                         this.expect(TokenKind::RightBrace)?;
 
-                        Value::empty_struct()
+                        ValueLiteral::empty_struct()
                     }
                     TokenKind::LeftBracket => {
                         this.expect(TokenKind::RightBracket)?;
 
-                        Value::Array(Vec::new())
+                        ValueLiteral::Array(Vec::new())
                     }
-                    TokenKind::Value(_) => Value::from_token(next),
+                    TokenKind::Value(_) => ValueLiteral::from_token(next),
                     _ => unexpected("Value or struct literal", next)?,
                 };
 
@@ -858,7 +899,7 @@ impl Parser {
 
                 Ok(SimpleExpression::ArrayLiteral(array))
             }
-            TokenKind::Value(_) => Ok(SimpleExpression::Value(Value::from_token(&next))),
+            TokenKind::Value(_) => Ok(SimpleExpression::Value(ValueLiteral::from_token(&next))),
             // TODO: Allow struct literals here
             TokenKind::Dot => Ok(SimpleExpression::StateAccess(self.access_path()?)),
             TokenKind::Identifier => {

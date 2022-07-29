@@ -8,6 +8,7 @@ mod interpreter;
 mod lexer;
 mod meta_interpreter;
 mod parser;
+mod typechecker;
 mod util;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

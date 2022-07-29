@@ -69,5 +69,7 @@ procedure main {
 
     .stored = access([1,2,9001,3], 2);
 
-    .others[2] = 2;
+    .others[2] = 1000000;
+
+    .s.num = 10000000000000;
 }

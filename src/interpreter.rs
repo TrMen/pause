@@ -4,7 +4,7 @@ use crate::{
     lexer::{AssignOp, ExecutionDesignator},
     parser::{
         AccessPath, EvaluatedAccessPath, EvaluatedIndirection, Expression, Indirection, Program,
-        SimpleExpression, Statement, Struct, Value,
+        SimpleExpression, Statement, Struct, ValueLiteral,
     },
 };
 
@@ -39,7 +39,7 @@ pub enum InterpretationError {
     ReturnTypeMissmatch { expected: String, actual: String }, // TODO: Should be some enum or int identifying types, rather than a string
     #[error("Trying to assign value '{value:#?}' of type '{actual}' to field or binding of type '{expected}'")]
     AssignmentTypeMissmatch {
-        value: Value,
+        value: ValueLiteral,
         expected: String,
         actual: String,
     }, // TODO: Should be some enum or int identifying types, rather than a string
@@ -48,7 +48,7 @@ pub enum InterpretationError {
         func_name: String,
         param_name: String,
         expected_type: String,
-        actual_val: Value,
+        actual_val: ValueLiteral,
         actual_type: String,
     }, //
     #[error("Incorrect number of arguments for call to function '{name}'. Expected '{expected}' arguments, got '{actual}'.")]
@@ -58,11 +58,16 @@ pub enum InterpretationError {
         actual: usize,
     },
     #[error("Trying to access array with index value '{value:#?}' of type '{type_name}'. Only integers are allowed.")]
-    ArrayIndexTypeError { value: Value, type_name: String },
+    ArrayIndexTypeError {
+        value: ValueLiteral,
+        type_name: String,
+    },
     #[error("Trying to access value '{value:#?}' as if it were an array.")]
-    ArrayTypeError { value: Value },
+    ArrayTypeError { value: ValueLiteral },
+    #[error("Trying to access value '{value:#?}' as if it were a struct.")]
+    StructTypeError { value: ValueLiteral },
     #[error("Out of bounds array access on '{:#?}'. Index: '{index}'")]
-    OutOfBoundsArrayAccess { array: Value, index: usize },
+    OutOfBoundsArrayAccess { array: ValueLiteral, index: usize },
 }
 
 use InterpretationError::*;
@@ -73,7 +78,7 @@ pub(crate) type InterpretationResult<T> = Result<T, InterpretationError>;
 pub struct Binding {
     name: String,
     type_name: String,
-    value: Value,
+    value: ValueLiteral,
 }
 
 #[derive(Clone, Debug)]
@@ -213,6 +218,8 @@ impl Interpreter {
 
         let path = evaluate_path(scope, lhs, &self.state, program)?;
 
+        dbg!(&path);
+
         let field = self
             .state
             .get_field_mut(&path.name)?
@@ -235,7 +242,8 @@ impl Interpreter {
             // definitions.
             AssignOp::Equal => *field = rhs_value,
             AssignOp::PlusEqual => {
-                if let (Value::Number(field), Value::Number(rhs)) = (field, rhs_value) {
+                if let (ValueLiteral::Number(field), ValueLiteral::Number(rhs)) = (field, rhs_value)
+                {
                     *field += rhs;
                 } else {
                     todo!("Invalid assignment");
@@ -280,10 +288,12 @@ pub fn evaluate_path(
 
     for indirection in &path.indirections {
         match indirection {
-            Indirection::Field(_) => todo!("Do I need to do anything here? "),
+            Indirection::Field(field_name) => eval_path
+                .indirections
+                .push(EvaluatedIndirection::Field(field_name.to_string())),
             Indirection::Subscript(index_expr) => {
                 let evaluated = evaluate_expression(scope, state, program, index_expr)?;
-                if let Value::Number(index) = evaluated {
+                if let ValueLiteral::Number(index) = evaluated {
                     eval_path
                         .indirections
                         .push(EvaluatedIndirection::Subscript(index.try_into().unwrap()));
@@ -307,7 +317,7 @@ pub fn evaluate_expression(
     state: &Struct,
     program: &Program,
     expression: &Expression,
-) -> InterpretationResult<Value> {
+) -> InterpretationResult<ValueLiteral> {
     match expression {
         Expression::Binary { lhs, op, rhs } => {
             let lhs = evaluate_simple_expression(scope, state, program, lhs)?;
@@ -316,12 +326,12 @@ pub fn evaluate_expression(
 
             match op {
                 crate::lexer::BinaryOp::Plus => {
-                    Ok(Value::Number(lhs.as_number() + rhs.as_number()))
+                    Ok(ValueLiteral::Number(lhs.as_number() + rhs.as_number()))
                 }
                 crate::lexer::BinaryOp::Minus => {
-                    Ok(Value::Number(lhs.as_number() - rhs.as_number()))
+                    Ok(ValueLiteral::Number(lhs.as_number() - rhs.as_number()))
                 }
-                crate::lexer::BinaryOp::EqualEqual => Ok(Value::Bool(lhs == rhs)),
+                crate::lexer::BinaryOp::EqualEqual => Ok(ValueLiteral::Bool(lhs == rhs)),
             }
         }
         Expression::Simple(simple) => evaluate_simple_expression(scope, state, program, simple),
@@ -333,7 +343,7 @@ pub fn evaluate_simple_expression(
     state: &Struct,
     program: &Program,
     simple: &SimpleExpression,
-) -> InterpretationResult<Value> {
+) -> InterpretationResult<ValueLiteral> {
     match simple {
         SimpleExpression::Value(value) => Ok(value.clone()),
         SimpleExpression::StateAccess(access_path) => {
@@ -358,14 +368,14 @@ pub fn evaluate_simple_expression(
                 evaluated_array.push(evaluate_expression(scope, state, program, expression)?);
             }
 
-            Ok(Value::Array(evaluated_array))
+            Ok(ValueLiteral::Array(evaluated_array))
         }
         // TODO: This should just be a path access. But have to parse that correctly
         SimpleExpression::ArrayAccess { target, index } => {
             let target = evaluate_expression(scope, state, program, target)?;
             let index_val = evaluate_expression(scope, state, program, index)?;
 
-            if let Value::Number(index) = index_val {
+            if let ValueLiteral::Number(index) = index_val {
                 Ok(target.access_array(index.try_into().unwrap())?.clone())
             } else {
                 Err(ArrayIndexTypeError {
@@ -382,7 +392,7 @@ pub fn struct_field_access<'a>(
     structure: &'a Struct,
     program: &Program,
     path: &AccessPath,
-) -> InterpretationResult<&'a Value> {
+) -> InterpretationResult<&'a ValueLiteral> {
     structure
         .get_field(&path.name)?
         .value
@@ -394,7 +404,7 @@ pub fn struct_field_access_mut<'a>(
     structure: &'a mut Struct,
     program: &Program,
     path: &AccessPath,
-) -> InterpretationResult<&'a Value> {
+) -> InterpretationResult<&'a ValueLiteral> {
     let path = evaluate_path(scope, path, structure, program)?;
 
     structure
@@ -409,7 +419,7 @@ pub fn evaluate_function(
     program: &Program,
     name: &str,
     arguments: &Vec<Expression>,
-) -> InterpretationResult<Value> {
+) -> InterpretationResult<ValueLiteral> {
     let function = program
         .functions
         .get(name)
