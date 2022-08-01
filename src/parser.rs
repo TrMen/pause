@@ -4,172 +4,9 @@ use std::{backtrace::Backtrace, collections::HashMap};
 
 use crate::{
     interpreter::{InterpretationError, InterpretationResult},
-    lexer::{AssignOp, BinaryOp, ExecutionDesignator, Token, TokenKind, ValueKind},
-    typechecker::{BuildinType, Type},
+    lexer::{AssignOp, BinaryOp, ExecutionDesignator, Token, TokenKind},
+    typechecker::BuildinType,
 };
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ValueLiteral {
-    String(String),
-    Number(u64),
-    Bool(bool),
-    // TODO: The fields of a struct literal aren't really typed, right?
-    Struct(Struct),
-    Array(Vec<ValueLiteral>),
-}
-
-impl ValueLiteral {
-    pub fn typ(&self) -> Type {
-        match self {
-            ValueLiteral::String(_) => Type::Buildin(BuildinType::String),
-            ValueLiteral::Number(_) => Type::Buildin(BuildinType::U64),
-            ValueLiteral::Bool(_) => Type::Buildin(BuildinType::Bool),
-            ValueLiteral::Struct(_) => todo!(),
-            ValueLiteral::Array(_) => todo!(),
-        }
-    }
-
-    pub fn from_token(token: &Token) -> Self {
-        match token.kind {
-            TokenKind::Value(ValueKind::String) => Self::String(token.lexeme.clone()),
-            TokenKind::Value(ValueKind::Number) => Self::Number(str::parse(&token.lexeme).unwrap()),
-            TokenKind::Value(ValueKind::True) => Self::Bool(true),
-            TokenKind::Value(ValueKind::False) => Self::Bool(false),
-            _ => panic!("Value::from_token() with bad token '{:?}'", token),
-        }
-    }
-
-    pub fn empty_struct() -> ValueLiteral {
-        ValueLiteral::Struct(Struct {
-            name: "<empty_struct>".to_string(),
-            fields: Vec::new(),
-        })
-    }
-
-    pub fn as_number(&self) -> u64 {
-        // TODO: Get rid of all this for proper typing
-        match self {
-            ValueLiteral::Number(num) => *num,
-            _ => todo!("Not a number"),
-        }
-    }
-
-    pub fn is_truthy(&self) -> InterpretationResult<bool> {
-        // TODO: Do I even want to have that? Better to typecheck, and then we simply don't have
-        // the 'Value' enum at all
-
-        match self {
-            ValueLiteral::Bool(boolean) => Ok(*boolean),
-            _ => Err(InterpretationError::InvalidTypeConversion {
-                from: self.type_name().to_string(),
-                to: ValueLiteral::Bool(true).type_name().to_string(),
-            }),
-        }
-    }
-
-    pub fn type_name(&self) -> &str {
-        match self {
-            ValueLiteral::String(_) => "string",
-            ValueLiteral::Number(_) => "u64",
-            ValueLiteral::Bool(_) => "bool",
-            ValueLiteral::Struct { .. } => "Struct",
-            ValueLiteral::Array(_) => "Array",
-        }
-    }
-
-    // TODO: Don't replicate these so much
-    pub fn access_array(&self, index: usize) -> InterpretationResult<&ValueLiteral> {
-        if let ValueLiteral::Array(array) = self {
-            Ok(array
-                .get(index)
-                .ok_or_else(|| InterpretationError::OutOfBoundsArrayAccess {
-                    array: ValueLiteral::Array(array.clone()),
-                    index,
-                })?)
-        } else {
-            Err(InterpretationError::ArrayTypeError {
-                value: self.clone(),
-            })
-        }
-    }
-
-    pub fn access_array_mut(&mut self, index: usize) -> InterpretationResult<&mut ValueLiteral> {
-        // TODO: This should be possible to write without cloning up here
-        let clone = self.clone();
-
-        if let ValueLiteral::Array(array) = self {
-            Ok(array
-                .get_mut(index)
-                .ok_or(InterpretationError::OutOfBoundsArrayAccess {
-                    array: clone,
-                    index,
-                })?)
-        } else {
-            Err(InterpretationError::ArrayTypeError {
-                value: self.clone(),
-            })
-        }
-    }
-
-    // TODO: Don't replicate these so much
-    pub fn access_field(&self, name: &str) -> InterpretationResult<&ValueLiteral> {
-        if let ValueLiteral::Struct(structure) = self {
-            structure.get_field(name).map(|field| &field.value)
-        } else {
-            Err(InterpretationError::StructTypeError {
-                value: self.clone(),
-            })
-        }
-    }
-
-    // TODO: Don't replicate these so much
-    pub fn access_field_mut(&mut self, name: &str) -> InterpretationResult<&mut ValueLiteral> {
-        if let ValueLiteral::Struct(structure) = self {
-            structure.get_field_mut(name).map(|field| &mut field.value)
-        } else {
-            Err(InterpretationError::StructTypeError {
-                value: self.clone(),
-            })
-        }
-    }
-
-    pub fn access_path(&self, path: &EvaluatedAccessPath) -> InterpretationResult<&ValueLiteral> {
-        let mut value = self;
-
-        for indirection in &path.indirections {
-            match indirection {
-                EvaluatedIndirection::Field(field_name) => {
-                    value = value.access_field(field_name)?;
-                }
-                EvaluatedIndirection::Subscript(index) => {
-                    value = value.access_array(*index)?;
-                }
-            }
-        }
-
-        Ok(value)
-    }
-
-    pub fn access_path_mut(
-        &mut self,
-        path: &EvaluatedAccessPath,
-    ) -> InterpretationResult<&mut ValueLiteral> {
-        let mut value = self;
-
-        for indirection in &path.indirections {
-            match indirection {
-                EvaluatedIndirection::Field(field_name) => {
-                    value = value.access_field_mut(field_name)?;
-                }
-                EvaluatedIndirection::Subscript(index) => {
-                    value = value.access_array_mut(*index)?;
-                }
-            }
-        }
-
-        Ok(value)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Indirection {
@@ -199,7 +36,10 @@ pub struct AccessPath {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SimpleExpression {
-    Value(ValueLiteral),
+    Boolean(bool),
+    String(String),
+    NumberLiteral(u64),
+    StructLiteral(Struct),
     ArrayLiteral(Vec<Expression>),
     ArrayAccess {
         target: Box<Expression>,
@@ -250,11 +90,21 @@ pub struct Procedure {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum ParsedType {
+    // TODO: Add things like reference, tuples, generics, functions
+    Simple { name: String },
+    Array { inner: Box<ParsedType> },
+    Void,
+    Unknown, // For things like struct literals that are assigned expressions
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct StructField {
     pub name: String,
-    pub type_name: String,
-    pub initial_value: ValueLiteral, //  TODO: Make clearer that this is just initial, nothing you can actually change at runtime
-    pub value: ValueLiteral, //  TODO: Make clearer that this is just initial, nothing you can actually change at runtime
+    pub parsed_type: ParsedType,
+    // TODO: Make sure this expression only uses literals
+    pub initializer: Expression,
+    // TODO: Add modifiers like is_mutable
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -262,40 +112,18 @@ pub struct Struct {
     pub name: String,
     pub fields: Vec<StructField>,
 }
-
-impl Struct {
-    pub fn get_field(&self, name: &str) -> InterpretationResult<&StructField> {
-        self.fields
-            .iter()
-            .find(|field| field.name == name)
-            .ok_or_else(|| InterpretationError::UndefinedStructField {
-                structure: self.name.clone(),
-                field_name: name.to_string(),
-            })
-    }
-
-    pub fn get_field_mut(&mut self, name: &str) -> InterpretationResult<&mut StructField> {
-        self.fields
-            .iter_mut()
-            .find(|field| field.name == name)
-            .ok_or_else(|| InterpretationError::UndefinedStructField {
-                structure: self.name.clone(),
-                field_name: name.to_string(),
-            })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+// TODO: This looks a lot like StructField. But prolly makes sense to keep them separate
+#[derive(Debug, Clone, PartialEq)]
 pub struct FunctionParameter {
     pub name: String,
-    pub type_name: String,
+    pub parsed_type: ParsedType,
 }
 
 #[derive(Debug, Clone)]
 pub struct Function {
     pub name: String,
     pub params: Vec<FunctionParameter>,
-    pub return_type: String,
+    pub return_type: ParsedType,
     pub expression: Expression,
 }
 
@@ -329,13 +157,16 @@ impl Program {
             Statement::StateAssignment { .. } => (), // TODO: actually check this
             Statement::Expression(expression) => match expression {
                 Expression::Simple(simple) => match simple {
-                    SimpleExpression::Value(_) => (),
                     SimpleExpression::StateAccess(_) => todo!(),
                     SimpleExpression::ExecutionAccess { execution, path } => todo!(),
                     SimpleExpression::FunctionCall { name, arguments } => todo!(),
                     SimpleExpression::BindingAccess(_) => todo!(),
                     SimpleExpression::ArrayLiteral(_) => todo!(),
                     SimpleExpression::ArrayAccess { target, index } => todo!(),
+                    SimpleExpression::Boolean(_) => todo!(),
+                    SimpleExpression::String(_) => todo!(),
+                    SimpleExpression::NumberLiteral(_) => todo!(),
+                    SimpleExpression::StructLiteral(_) => todo!(),
                 },
                 Expression::Binary { .. } => todo!(),
             },
@@ -566,10 +397,9 @@ impl Parser {
 
         if name == "main" {
             self.main = Some(proc.clone());
+        } else {
+            self.procedures.insert(name, proc);
         }
-
-        // TODO: Not sure if allowing to refer to main like any other procedure is smart.
-        self.procedures.insert(name, proc);
 
         Ok(())
     }
@@ -578,7 +408,7 @@ impl Parser {
         &mut self,
         name: String,
         params: Vec<FunctionParameter>,
-        return_type: String,
+        return_type: ParsedType,
         expression: Expression,
     ) -> ParseResult<()> {
         let func = Function {
@@ -676,36 +506,22 @@ impl Parser {
                 let name = this.expect(TokenKind::Identifier)?.lexeme.clone();
                 this.expect(TokenKind::Colon)?;
 
-                let type_name = this.type_name()?;
+                let parsed_type = this.parsed_type()?;
 
                 this.expect(TokenKind::AssignOp(AssignOp::Equal))?;
 
                 let next = this.advance()?;
 
-                let initializer = match next.kind {
-                    TokenKind::LeftBrace => {
-                        this.expect(TokenKind::RightBrace)?;
+                let initializer = self.expression()?;
 
-                        ValueLiteral::empty_struct()
-                    }
-                    TokenKind::LeftBracket => {
-                        this.expect(TokenKind::RightBracket)?;
-
-                        ValueLiteral::Array(Vec::new())
-                    }
-                    TokenKind::Value(_) => ValueLiteral::from_token(next),
-                    _ => unexpected("Value or struct literal", next)?,
-                };
-
-                println!("{}: {} = {:?}", name, type_name, initializer);
+                println!("{}: {:?} = {:?}", name, parsed_type, initializer);
 
                 println!("NEXT: {:?}", this.peek()?);
 
                 Ok(StructField {
                     name,
-                    type_name,
-                    initial_value: initializer.clone(),
-                    value: initializer,
+                    parsed_type,
+                    initializer,
                 })
             },
             TokenKind::Comma,
@@ -717,14 +533,19 @@ impl Parser {
         Ok(())
     }
 
-    fn type_name(&mut self) -> ParseResult<String> {
+    fn parsed_type(&mut self) -> ParseResult<ParsedType> {
         let next = self.advance()?;
         match next.kind {
             TokenKind::LeftBracket => {
+                let inner = Box::new(self.parsed_type()?);
                 self.expect(TokenKind::RightBracket)?;
-                Ok("Array".to_string())
+                Ok(ParsedType::Array { inner })
             }
-            TokenKind::Identifier => Ok(next.lexeme.clone()),
+            TokenKind::Identifier => Ok(ParsedType::Simple {
+                name: next.lexeme.to_string(),
+            }),
+            // TODO: How to handle void? I don't think anything is ever explicitly 'void' type, so
+            // doesn't need to be parsed
             _ => unexpected("type name", next)?,
         }
     }
@@ -755,9 +576,9 @@ impl Parser {
 
                 this.expect(TokenKind::Colon)?;
 
-                let type_name = this.type_name()?;
+                let parsed_type = this.parsed_type()?;
 
-                Ok(FunctionParameter { name, type_name })
+                Ok(FunctionParameter { name, parsed_type })
             },
             TokenKind::Comma,
             TokenKind::RightParen
@@ -765,7 +586,7 @@ impl Parser {
 
         self.expect(TokenKind::SmallArrow)?;
 
-        let return_type = self.type_name()?;
+        let return_type = self.parsed_type()?;
 
         self.expect(TokenKind::LeftBrace)?;
 
@@ -899,7 +720,12 @@ impl Parser {
 
                 Ok(SimpleExpression::ArrayLiteral(array))
             }
-            TokenKind::Value(_) => Ok(SimpleExpression::Value(ValueLiteral::from_token(&next))),
+            TokenKind::Number => Ok(SimpleExpression::NumberLiteral(
+                str::parse(&next.lexeme).unwrap(),
+            )),
+            TokenKind::String => Ok(SimpleExpression::String(next.lexeme.to_string())),
+            TokenKind::True => Ok(SimpleExpression::Boolean(true)),
+            TokenKind::False => Ok(SimpleExpression::Boolean(false)),
             // TODO: Allow struct literals here
             TokenKind::Dot => Ok(SimpleExpression::StateAccess(self.access_path()?)),
             TokenKind::Identifier => {

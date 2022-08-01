@@ -12,14 +12,6 @@ pub enum BinaryOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValueKind {
-    Number,
-    String,
-    True,
-    False,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionDesignator {
     Past,
     Current,
@@ -27,7 +19,10 @@ pub enum ExecutionDesignator {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
-    Value(ValueKind),
+    Number,
+    String,
+    True,
+    False,
     BinaryOp(BinaryOp),
     AssignOp(AssignOp),
     ExecutionDesignator(ExecutionDesignator),
@@ -160,15 +155,9 @@ impl<'a> Lexer<'a> {
             }
             b'[' => TokenKind::LeftBracket,
             b']' => TokenKind::RightBracket,
-            b't' => {
-                return Some(self.keyword_or_identifier("rue", TokenKind::Value(ValueKind::True)))
-            }
+            b't' => return Some(self.keyword_or_identifier("rue", TokenKind::True)),
             b'f' => match self.advance()? {
-                b'a' => {
-                    return Some(
-                        self.keyword_or_identifier("lse", TokenKind::Value(ValueKind::False)),
-                    )
-                }
+                b'a' => return Some(self.keyword_or_identifier("lse", TokenKind::False)),
                 b'u' => return Some(self.keyword_or_identifier("nction", TokenKind::Function)),
                 _ => return Some(self.identifier()),
             },
@@ -197,7 +186,7 @@ impl<'a> Lexer<'a> {
             self.advance();
         }
 
-        self.make_token(TokenKind::Value(ValueKind::Number))
+        self.make_token(TokenKind::Number)
     }
 
     fn identifier(&mut self) -> Token {

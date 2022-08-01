@@ -1,9 +1,8 @@
 program = top_level_decl...
 top_level_decl = struct | prodedure | assertion | function
 
-struct = 'struct' 'identifier' '{' vardecl... '}'
-vardecl = identifer ':' type_name '=' initializer ','
-initializer = value | '{''}'
+struct = 'struct' 'identifier' '{' field_decl... '}'
+field_decl = identifer ':' type_name '=' expression ','
 
 procedure = 'procedure' identifier '{' procedure_body '}'
 assertion = 'assertion' identifier '{' expression '}'
@@ -11,7 +10,7 @@ function = 'function' identifier '(' params ')' '->' type_name '{' expression '}
 
 params = identifier ':' type_name [','] | identifier ':' type_name ',' params
 procedure_body = statement...
-statement = procedure_call | assertion_statement | expression ';' | simple_expression assign_op expression ';'
+statement = procedure_call | assertion_statement | expression ';' | expression assign_op expression ';'
 procedure_call_ = '..' identifier ';'
 assertion_statement = '!' identifier ';' 
 
@@ -47,6 +46,7 @@ Additional rules:
 - Expressions always yield a value (that's why any expression is fine in an assertion)
 - The expressions in functions cannot access state. Only in procedures (and there also assign), and assertions (read-only there)
 - SimpleExpression on lhs of assigment must refer to state
+- Struct field init expression must use globally-defined things
 
 
 TODO:

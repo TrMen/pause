@@ -3,8 +3,8 @@ use thiserror::Error;
 use crate::{
     lexer::{AssignOp, ExecutionDesignator},
     parser::{
-        AccessPath, EvaluatedAccessPath, EvaluatedIndirection, Expression, Indirection, Program,
-        SimpleExpression, Statement, Struct, ValueLiteral,
+        AccessPath, EvaluatedAccessPath, EvaluatedIndirection, Expression, Indirection, ParsedType,
+        Program, SimpleExpression, Statement,
     },
 };
 
@@ -23,7 +23,7 @@ pub enum InterpretationError {
     #[error("Access of undefined binding '{0}'")]
     UndefinedBinding(String),
     #[error("Trying to access undefined field '{field_name}' of struct '{structure}'")]
-    UndefinedStructField {
+    UndefinedRuntimeStructField {
         structure: String,
         field_name: String,
     },
@@ -39,7 +39,7 @@ pub enum InterpretationError {
     ReturnTypeMissmatch { expected: String, actual: String }, // TODO: Should be some enum or int identifying types, rather than a string
     #[error("Trying to assign value '{value:#?}' of type '{actual}' to field or binding of type '{expected}'")]
     AssignmentTypeMissmatch {
-        value: ValueLiteral,
+        value: RuntimeValue,
         expected: String,
         actual: String,
     }, // TODO: Should be some enum or int identifying types, rather than a string
@@ -48,7 +48,7 @@ pub enum InterpretationError {
         func_name: String,
         param_name: String,
         expected_type: String,
-        actual_val: ValueLiteral,
+        actual_val: RuntimeValue,
         actual_type: String,
     }, //
     #[error("Incorrect number of arguments for call to function '{name}'. Expected '{expected}' arguments, got '{actual}'.")]
@@ -59,26 +59,183 @@ pub enum InterpretationError {
     },
     #[error("Trying to access array with index value '{value:#?}' of type '{type_name}'. Only integers are allowed.")]
     ArrayIndexTypeError {
-        value: ValueLiteral,
+        value: RuntimeValue,
         type_name: String,
     },
     #[error("Trying to access value '{value:#?}' as if it were an array.")]
-    ArrayTypeError { value: ValueLiteral },
+    ArrayTypeError { value: RuntimeValue },
     #[error("Trying to access value '{value:#?}' as if it were a struct.")]
-    StructTypeError { value: ValueLiteral },
+    RuntimeStructTypeError { value: RuntimeValue },
     #[error("Out of bounds array access on '{:#?}'. Index: '{index}'")]
-    OutOfBoundsArrayAccess { array: ValueLiteral, index: usize },
+    OutOfBoundsArrayAccess { array: RuntimeValue, index: usize },
 }
 
 use InterpretationError::*;
 
 pub(crate) type InterpretationResult<T> = Result<T, InterpretationError>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeStruct {
+    name: String,
+    // TODO: Shouldn't be bindings
+    fields: Vec<Binding>,
+}
+
+impl RuntimeStruct {
+    pub fn get_field(&self, name: &str) -> InterpretationResult<&Binding> {
+        self.fields
+            .iter()
+            .find(|field| field.name == name)
+            .ok_or_else(|| InterpretationError::UndefinedRuntimeStructField {
+                structure: self.name.clone(),
+                field_name: name.to_string(),
+            })
+    }
+
+    pub fn get_field_mut(&mut self, name: &str) -> InterpretationResult<&mut Binding> {
+        self.fields
+            .iter_mut()
+            .find(|field| field.name == name)
+            .ok_or_else(|| InterpretationError::UndefinedRuntimeStructField {
+                structure: self.name.clone(),
+                field_name: name.to_string(),
+            })
+    }
+}
+
+// TODO: This won't be required when we no longer do runtime typechecking, but I'm not exactly sure
+// how to efficiently store arbitrary 'values' without boxing everything.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RuntimeValue {
+    String(String),
+    Number(u64),
+    Array(Vec<RuntimeValue>),
+    RuntimeStruct(RuntimeStruct),
+}
+
+impl RuntimeValue {
+    pub fn is_truthy(&self) -> InterpretationResult<bool> {
+        // TODO: Do I even want to have that? Better to typecheck, and then we simply don't have
+        // the 'Value' enum at all
+
+        match self {
+            RuntimeValue::Bool(boolean) => Ok(*boolean),
+            _ => Err(InterpretationError::InvalidTypeConversion {
+                from: self.type_name().to_string(),
+                to: RuntimeValue::Bool(true).type_name().to_string(),
+            }),
+        }
+    }
+
+    pub fn type_name(&self) -> &str {
+        match self {
+            RuntimeValue::String(_) => "string",
+            RuntimeValue::Number(_) => "u64",
+            RuntimeValue::Bool(_) => "bool",
+            RuntimeValue::Struct { .. } => "Struct",
+            RuntimeValue::Array(_) => "Array",
+        }
+    }
+
+    // TODO: Don't replicate these so much
+    pub fn access_array(&self, index: usize) -> InterpretationResult<&RuntimeValue> {
+        if let RuntimeValue::Array(array) = self {
+            Ok(array
+                .get(index)
+                .ok_or_else(|| InterpretationError::OutOfBoundsArrayAccess {
+                    array: RuntimeValue::Array(array.clone()),
+                    index,
+                })?)
+        } else {
+            Err(InterpretationError::ArrayTypeError {
+                value: self.clone(),
+            })
+        }
+    }
+
+    pub fn access_array_mut(&mut self, index: usize) -> InterpretationResult<&mut RuntimeValue> {
+        // TODO: This should be possible to write without cloning up here
+        let clone = self.clone();
+
+        if let RuntimeValue::Array(array) = self {
+            Ok(array
+                .get_mut(index)
+                .ok_or(InterpretationError::OutOfBoundsArrayAccess {
+                    array: clone,
+                    index,
+                })?)
+        } else {
+            Err(InterpretationError::ArrayTypeError {
+                value: self.clone(),
+            })
+        }
+    }
+
+    // TODO: Don't replicate these so much
+    pub fn access_field(&self, name: &str) -> InterpretationResult<&RuntimeValue> {
+        if let RuntimeValue::Struct(structure) = self {
+            structure.get_field(name).map(|field| &field.value)
+        } else {
+            Err(InterpretationError::StructTypeError {
+                value: self.clone(),
+            })
+        }
+    }
+
+    // TODO: Don't replicate these so much
+    pub fn access_field_mut(&mut self, name: &str) -> InterpretationResult<&mut RuntimeValue> {
+        if let RuntimeValue::Struct(structure) = self {
+            structure.get_field_mut(name).map(|field| &mut field.value)
+        } else {
+            Err(InterpretationError::StructTypeError {
+                value: self.clone(),
+            })
+        }
+    }
+
+    pub fn access_path(&self, path: &EvaluatedAccessPath) -> InterpretationResult<&RuntimeValue> {
+        let mut value = self;
+
+        for indirection in &path.indirections {
+            match indirection {
+                EvaluatedIndirection::Field(field_name) => {
+                    value = value.access_field(field_name)?;
+                }
+                EvaluatedIndirection::Subscript(index) => {
+                    value = value.access_array(*index)?;
+                }
+            }
+        }
+
+        Ok(value)
+    }
+
+    pub fn access_path_mut(
+        &mut self,
+        path: &EvaluatedAccessPath,
+    ) -> InterpretationResult<&mut RuntimeValue> {
+        let mut value = self;
+
+        for indirection in &path.indirections {
+            match indirection {
+                EvaluatedIndirection::Field(field_name) => {
+                    value = value.access_field_mut(field_name)?;
+                }
+                EvaluatedIndirection::Subscript(index) => {
+                    value = value.access_array_mut(*index)?;
+                }
+            }
+        }
+
+        Ok(value)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Binding {
     name: String,
-    type_name: String,
-    value: ValueLiteral,
+    type_name: ParsedType,
+    value: RuntimeValue,
 }
 
 #[derive(Clone, Debug)]
@@ -115,13 +272,13 @@ impl Scope {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Interpreter {
-    pub state: Struct,
+    pub state: RuntimeStruct,
 
     main_index: usize,
 }
 
 impl Interpreter {
-    pub fn new(state: Struct) -> Self {
+    pub fn new(state: RuntimeStruct) -> Self {
         Self {
             state,
             main_index: 0,
@@ -238,11 +395,11 @@ impl Interpreter {
         }
 
         match assign_op {
-            // TODO: This should not use the Struct strucutre, since that's for source code
+            // TODO: This should not use the RuntimeStruct strucutre, since that's for source code
             // definitions.
             AssignOp::Equal => *field = rhs_value,
             AssignOp::PlusEqual => {
-                if let (ValueLiteral::Number(field), ValueLiteral::Number(rhs)) = (field, rhs_value)
+                if let (RuntimeValue::Number(field), RuntimeValue::Number(rhs)) = (field, rhs_value)
                 {
                     *field += rhs;
                 } else {
@@ -278,7 +435,7 @@ impl Interpreter {
 pub fn evaluate_path(
     scope: &Scope,
     path: &AccessPath,
-    state: &Struct,
+    state: &RuntimeStruct,
     program: &Program,
 ) -> InterpretationResult<EvaluatedAccessPath> {
     let mut eval_path = EvaluatedAccessPath {
@@ -293,7 +450,7 @@ pub fn evaluate_path(
                 .push(EvaluatedIndirection::Field(field_name.to_string())),
             Indirection::Subscript(index_expr) => {
                 let evaluated = evaluate_expression(scope, state, program, index_expr)?;
-                if let ValueLiteral::Number(index) = evaluated {
+                if let RuntimeValue::Number(index) = evaluated {
                     eval_path
                         .indirections
                         .push(EvaluatedIndirection::Subscript(index.try_into().unwrap()));
@@ -314,10 +471,10 @@ pub fn evaluate_path(
 // procedure calls
 pub fn evaluate_expression(
     scope: &Scope,
-    state: &Struct,
+    state: &RuntimeStruct,
     program: &Program,
     expression: &Expression,
-) -> InterpretationResult<ValueLiteral> {
+) -> InterpretationResult<RuntimeValue> {
     match expression {
         Expression::Binary { lhs, op, rhs } => {
             let lhs = evaluate_simple_expression(scope, state, program, lhs)?;
@@ -326,12 +483,12 @@ pub fn evaluate_expression(
 
             match op {
                 crate::lexer::BinaryOp::Plus => {
-                    Ok(ValueLiteral::Number(lhs.as_number() + rhs.as_number()))
+                    Ok(RuntimeValue::Number(lhs.as_number() + rhs.as_number()))
                 }
                 crate::lexer::BinaryOp::Minus => {
-                    Ok(ValueLiteral::Number(lhs.as_number() - rhs.as_number()))
+                    Ok(RuntimeValue::Number(lhs.as_number() - rhs.as_number()))
                 }
-                crate::lexer::BinaryOp::EqualEqual => Ok(ValueLiteral::Bool(lhs == rhs)),
+                crate::lexer::BinaryOp::EqualEqual => Ok(RuntimeValue::Bool(lhs == rhs)),
             }
         }
         Expression::Simple(simple) => evaluate_simple_expression(scope, state, program, simple),
@@ -340,10 +497,10 @@ pub fn evaluate_expression(
 
 pub fn evaluate_simple_expression(
     scope: &Scope,
-    state: &Struct,
+    state: &RuntimeStruct,
     program: &Program,
     simple: &SimpleExpression,
-) -> InterpretationResult<ValueLiteral> {
+) -> InterpretationResult<RuntimeValue> {
     match simple {
         SimpleExpression::Value(value) => Ok(value.clone()),
         SimpleExpression::StateAccess(access_path) => {
@@ -368,14 +525,14 @@ pub fn evaluate_simple_expression(
                 evaluated_array.push(evaluate_expression(scope, state, program, expression)?);
             }
 
-            Ok(ValueLiteral::Array(evaluated_array))
+            Ok(RuntimeValue::Array(evaluated_array))
         }
         // TODO: This should just be a path access. But have to parse that correctly
         SimpleExpression::ArrayAccess { target, index } => {
             let target = evaluate_expression(scope, state, program, target)?;
             let index_val = evaluate_expression(scope, state, program, index)?;
 
-            if let ValueLiteral::Number(index) = index_val {
+            if let RuntimeValue::Number(index) = index_val {
                 Ok(target.access_array(index.try_into().unwrap())?.clone())
             } else {
                 Err(ArrayIndexTypeError {
@@ -389,10 +546,10 @@ pub fn evaluate_simple_expression(
 
 pub fn struct_field_access<'a>(
     scope: &Scope,
-    structure: &'a Struct,
+    structure: &'a RuntimeStruct,
     program: &Program,
     path: &AccessPath,
-) -> InterpretationResult<&'a ValueLiteral> {
+) -> InterpretationResult<&'a RuntimeValue> {
     structure
         .get_field(&path.name)?
         .value
@@ -401,10 +558,10 @@ pub fn struct_field_access<'a>(
 
 pub fn struct_field_access_mut<'a>(
     scope: &Scope,
-    structure: &'a mut Struct,
+    structure: &'a mut RuntimeStruct,
     program: &Program,
     path: &AccessPath,
-) -> InterpretationResult<&'a ValueLiteral> {
+) -> InterpretationResult<&'a RuntimeValue> {
     let path = evaluate_path(scope, path, structure, program)?;
 
     structure
@@ -415,11 +572,11 @@ pub fn struct_field_access_mut<'a>(
 
 pub fn evaluate_function(
     scope: &Scope,
-    state: &Struct,
+    state: &RuntimeStruct,
     program: &Program,
     name: &str,
     arguments: &Vec<Expression>,
-) -> InterpretationResult<ValueLiteral> {
+) -> InterpretationResult<RuntimeValue> {
     let function = program
         .functions
         .get(name)
@@ -439,7 +596,7 @@ pub fn evaluate_function(
         .zip(arguments.iter())
         .map(|(param, arg)| -> InterpretationResult<Binding> {
             let arg = evaluate_expression(scope, state, program, arg)?;
-            if param.type_name != arg.type_name() {
+            if param.parsed_type != arg.type_name() {
                 return Err(FunctionArgumentTypeMissmatch {
                     func_name: function.name.to_string(),
                     param_name: param.name.clone(),
