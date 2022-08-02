@@ -30,6 +30,15 @@ impl TypeId {
         Self { id }
     }
 
+    fn builtin(name: &str) -> Self {
+        Self {
+            id: BUILTIN_TYPES
+                .iter()
+                .position(|builtin| builtin == &name)
+                .unwrap(),
+        }
+    }
+
     fn unknown() -> Self {
         Self { id: usize::MAX }
     }
@@ -61,15 +70,9 @@ pub enum CheckedSimpleExpression {
         elements: Vec<CheckedExpression>,
         type_id: TypeId,
     },
-    ArrayAccess {
-        target: Box<CheckedExpression>,
-        index: Box<CheckedExpression>,
-        type_id: TypeId,
-    },
     ExecutionAccess {
         execution: ExecutionDesignator,
         access_expression: Box<CheckedAccessExpression>,
-        type_id: TypeId,
     },
     BindingAccess {
         name: String,
@@ -85,36 +88,25 @@ pub enum CheckedSimpleExpression {
         type_id: TypeId,
     },
     Parentheses {
-        inner: Box<Expression>,
+        inner: Box<CheckedExpression>,
     },
 }
 
 impl Typed for CheckedSimpleExpression {
     fn type_id(&self) -> TypeId {
         match self {
-            CheckedSimpleExpression::Boolean(_) => todo!(),
-            CheckedSimpleExpression::String(_) => todo!(),
-            CheckedSimpleExpression::NumberLiteral(_) => todo!(),
+            CheckedSimpleExpression::Boolean(_) => TypeId::builtin("bool"),
+            CheckedSimpleExpression::String(_) => TypeId::builtin("string"),
+            CheckedSimpleExpression::NumberLiteral(_) => TypeId::builtin("u64"),
             CheckedSimpleExpression::StructLiteral { fields } => todo!(),
-            CheckedSimpleExpression::ArrayLiteral { elements, type_id } => todo!(),
-            CheckedSimpleExpression::ArrayAccess {
-                target,
-                index,
-                type_id,
-            } => todo!(),
+            CheckedSimpleExpression::ArrayLiteral { type_id, .. } => *type_id,
             CheckedSimpleExpression::ExecutionAccess {
-                execution,
-                access_expression,
-                type_id,
-            } => todo!(),
-            CheckedSimpleExpression::BindingAccess { name, type_id } => todo!(),
-            CheckedSimpleExpression::StateAccess { name, type_id } => todo!(),
-            CheckedSimpleExpression::FunctionCall {
-                name,
-                arguments,
-                type_id,
-            } => todo!(),
-            CheckedSimpleExpression::Parentheses { inner } => todo!(),
+                access_expression, ..
+            } => access_expression.type_id(),
+            CheckedSimpleExpression::BindingAccess { type_id, .. } => *type_id,
+            CheckedSimpleExpression::StateAccess { type_id, .. } => *type_id,
+            CheckedSimpleExpression::FunctionCall { type_id, .. } => *type_id,
+            CheckedSimpleExpression::Parentheses { inner } => inner.type_id(),
         }
     }
 }
@@ -140,28 +132,21 @@ impl Typed for CheckedExpression {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum CheckedAccessExpression {
-    Subscript {
-        lhs: CheckedSimpleExpression,
-        index_expr: Box<CheckedExpression>,
-        rest: Option<Box<CheckedAccessExpression>>,
-        type_id: TypeId,
-    },
-    FieldAccess {
-        lhs: CheckedSimpleExpression,
-        rest: Box<CheckedAccessExpression>,
-        type_id: TypeId,
-    },
-    Simple(CheckedSimpleExpression),
+pub enum CheckedIndirection {
+    Subscript { index_expr: CheckedExpression },
+    Field { field_name: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckedAccessExpression {
+    lhs: CheckedSimpleExpression,
+    indirections: Vec<CheckedIndirection>,
+    type_id: TypeId,
 }
 
 impl Typed for CheckedAccessExpression {
     fn type_id(&self) -> TypeId {
-        match self {
-            CheckedAccessExpression::Subscript { type_id, .. } => *type_id,
-            CheckedAccessExpression::FieldAccess { type_id, .. } => *type_id,
-            CheckedAccessExpression::Simple(expr) => expr.type_id(),
-        }
+        self.type_id
     }
 }
 
@@ -223,7 +208,7 @@ impl DefinedTypes {
             ParsedType::Simple { name } => self.get_id(name),
             ParsedType::Array { inner } => self.check_parsed(inner),
             ParsedType::Void => Ok(self.types["void"]),
-            ParsedType::Unknown => todo!(),
+            ParsedType::Unknown => Ok(TypeId::unknown()),
         }
     }
 }
@@ -243,7 +228,6 @@ impl Typed for CheckedStructField {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckedStruct {
     pub name: String,
@@ -252,7 +236,14 @@ pub struct CheckedStruct {
 
 impl CheckedStruct {
     pub fn type_of_field(&self, field_name: &str) -> TypeCheckResult<TypeId> {
-        self.fields.iter().find(|field| field.name == field_name).ok_or_else(|| UndefinedStructField { struct_name: self.name.to_string(), field_name: field_name.to_string()}).map(|field| field.type_id())
+        self.fields
+            .iter()
+            .find(|field| field.name == field_name)
+            .ok_or_else(|| UndefinedStructField {
+                struct_name: self.name.to_string(),
+                field_name: field_name.to_string(),
+            })
+            .map(|field| field.type_id())
     }
 }
 
@@ -261,6 +252,12 @@ impl CheckedStruct {
 pub struct CheckedFunctionParameter {
     pub name: String,
     pub type_id: TypeId,
+}
+
+impl Typed for CheckedFunctionParameter {
+    fn type_id(&self) -> TypeId {
+        self.type_id
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -388,7 +385,19 @@ pub enum TypeCheckError {
     UndefinedStructField {
         struct_name: String,
         field_name: String,
-    }
+    },
+    #[error("Trying to use expression '{expression:#?}' to as field access. Only identifiers can be used to access fields on structs.")]
+    StructFieldExpression { expression: SimpleExpression }, // Not typecheked, as we already know its wrong here without checking what it evaluates to
+    #[error("Trying to use expression '{:#?}' of type '{}' to index into array. Array indexing must be done with '{}'", .common.expr, .common.actual, .common.expected)]
+    ArraySubscript { common: TypeCheckErrorCommon },
+    #[error("Trying to call function '{func_name}' with '{arg_count}' arguments. '{param_count}' arguments are required")]
+    FunctionArgumentCount {
+        func_name: String,
+        arg_count: usize,
+        param_count: usize,
+    },
+    #[error("Incorrect argument for call to function '{}'. Expression '{:#?}' evaluates to '{}'. Expected '{}'", .common.context["function"], .common.expr, .common.actual, .common.expected)]
+    ParamArgMissmatch { common: TypeCheckErrorCommon },
 }
 
 use TypeCheckError::*;
@@ -398,6 +407,7 @@ pub struct TypeCheckErrorCommon {
     expr: CheckedExpression,
     actual: String,
     expected: String,
+    context: HashMap<String, String>,
 }
 
 impl Display for TypeCheckErrorCommon {
@@ -426,7 +436,7 @@ where
         .unwrap_or(Ok(()))
 }
 
-macro_rules! check_types {
+macro_rules! eval_lhs_and_check {
     ($program:expr, $lhs:expr, $rhs:expr, $error:ident) => {{
         let lhs_checked = typecheck_expression($program, $lhs)?;
 
@@ -436,6 +446,29 @@ macro_rules! check_types {
                     expr: lhs_checked,
                     actual: type_name($program, lhs_checked.type_id()),
                     expected: type_name($program, $rhs.type_id()),
+                    context: HashMap::new(),
+                },
+            })
+        } else {
+            Ok(lhs_checked)
+        }
+    }};
+
+    ($program:expr, $lhs:expr, $rhs:expr, $error:ident, $context:expr) => {{
+        let context = $context
+            .into_iter()
+            .map(|p| (p.0.to_string(), p.1.to_string()))
+            .collect();
+
+        let lhs_checked = typecheck_expression($program, $lhs)?;
+
+        if lhs_checked.type_id() != $rhs.type_id() {
+            Err(TypeCheckError::$error {
+                common: TypeCheckErrorCommon {
+                    expr: lhs_checked,
+                    actual: type_name($program, lhs_checked.type_id()),
+                    expected: type_name($program, $rhs.type_id()),
+                    context,
                 },
             })
         } else {
@@ -477,9 +510,11 @@ pub fn typecheck_program(program: Program) -> TypeCheckResult<CheckedProgram> {
                     params: Vec::new(),
                     return_type: TypeId::unknown(),
                     // TODO: Maybe avoid having to put random stuff here.
-                    expression: CheckedExpression::Access(CheckedAccessExpression::Simple(
-                        CheckedSimpleExpression::Boolean(false),
-                    )),
+                    expression: CheckedExpression::Access(CheckedAccessExpression {
+                        lhs: CheckedSimpleExpression::Boolean(false),
+                        indirections: Vec::new(),
+                        type_id: TypeId::unknown(),
+                    }),
                 },
             )
         })
@@ -555,7 +590,7 @@ fn typecheck_struct(program: &CheckedProgram, structure: Struct) -> TypeCheckRes
         .fields
         .into_iter()
         .map(|field| {
-            let initializer = check_types!(
+            let initializer = eval_lhs_and_check!(
                 program,
                 field.initializer,
                 program.defined_types.check_parsed(&field.parsed_type)?,
@@ -595,7 +630,8 @@ fn typecheck_function(
         })
         .collect::<Result<_, _>>()?;
 
-    let expression = check_types!(program, function.expression, return_type, FunctionReturn)?;
+    let expression =
+        eval_lhs_and_check!(program, function.expression, return_type, FunctionReturn)?;
 
     Ok(CheckedFunction {
         name: function.name,
@@ -625,7 +661,7 @@ fn typecheck_assertion(
     program: &CheckedProgram,
     assertion: Assertion,
 ) -> TypeCheckResult<CheckedAssertion> {
-    let predicate = check_types!(
+    let predicate = eval_lhs_and_check!(
         program,
         assertion.predicate,
         program
@@ -673,7 +709,7 @@ pub fn typecheck_statement(
         } => {
             let lhs = typecheck_access_expression(program, lhs)?;
 
-            let rhs = check_types!(program, rhs, lhs.type_id(), AssignmentMissmatch)?;
+            let rhs = eval_lhs_and_check!(program, rhs, lhs.type_id(), AssignmentMissmatch)?;
 
             // Just here so the compile fails if I add more assing ops that might change the type.
             match assign_op {
@@ -704,7 +740,7 @@ pub fn typecheck_expression(
         Expression::Binary { lhs, op, rhs } => {
             let lhs = typecheck_access_expression(program, lhs)?;
 
-            let rhs = Box::new(check_types!(
+            let rhs = Box::new(eval_lhs_and_check!(
                 program,
                 *rhs,
                 lhs.type_id(),
@@ -763,37 +799,51 @@ pub fn typecheck_access_expression(
     program: &CheckedProgram,
     access: AccessExpression,
 ) -> TypeCheckResult<CheckedAccessExpression> {
-    match access {
-        AccessExpression::Subscript {
-            lhs,
-            index_expr,
-            rest,
-        } => todo!(),
-        AccessExpression::FieldAccess { lhs, rest } => {
-            let lhs = typecheck_simple_expression(program, lhs)?;
+    let lhs = typecheck_simple_expression(program, access.lhs)?;
 
-            let rest = Box::new(typecheck_access_expression(program, *rest)?);
+    let mut type_id = lhs.type_id();
 
-            let lhs_struct = program.get_struct_for_type(lhs.type_id())?;
+    let indirections = access
+        .indirections
+        .into_iter()
+        .map(|indirection| match indirection {
+            Indirection::Subscript { index_expr } => {
+                let index_expr = eval_lhs_and_check!(
+                    program,
+                    index_expr,
+                    program.defined_types.get_id("u64").expect("u64 undefined"),
+                    ArraySubscript
+                )?;
 
-            lhs_struct.type_of_field()?
+                // TODO: If array subscript can change the type then we have to adjust type_id
+                // here. But I think so far, it can't change the type
 
-            Ok(CheckedAccessExpression::FieldAccess { lhs, rest, type_id })
-        }
-        AccessExpression::Simple(simple) => Ok(CheckedAccessExpression::Simple(
-            typecheck_simple_expression(program, simple)?,
-        )),
-    }
+                Ok(CheckedIndirection::Subscript { index_expr })
+            }
+            Indirection::Field { field_name } => {
+                let accessed_struct = program.get_struct_for_type(type_id)?;
+                type_id = accessed_struct.type_of_field(&field_name)?;
+
+                Ok(CheckedIndirection::Field { field_name })
+            }
+        })
+        .collect::<Result<_, _>>()?;
+
+    Ok(CheckedAccessExpression {
+        lhs,
+        indirections,
+        type_id,
+    })
 }
 
 pub fn typecheck_simple_expression(
     program: &CheckedProgram,
     simple: SimpleExpression,
 ) -> TypeCheckResult<CheckedSimpleExpression> {
-    Ok(match &simple {
-        SimpleExpression::Boolean(value) => CheckedSimpleExpression::Boolean(*value),
-        SimpleExpression::NumberLiteral(value) => CheckedSimpleExpression::NumberLiteral(*value),
-        SimpleExpression::String(value) => CheckedSimpleExpression::String(value.clone()),
+    Ok(match simple {
+        SimpleExpression::Boolean(value) => CheckedSimpleExpression::Boolean(value),
+        SimpleExpression::NumberLiteral(value) => CheckedSimpleExpression::NumberLiteral(value),
+        SimpleExpression::String(value) => CheckedSimpleExpression::String(value),
         SimpleExpression::ArrayLiteral(array) => {
             let arr_type = if let Some(first) = array.first() {
                 typecheck_expression(program, first.clone())?.type_id()
@@ -803,7 +853,7 @@ pub fn typecheck_simple_expression(
 
             let elements = array
                 .into_iter()
-                .map(|expr| check_types!(program, *expr, arr_type, ArrayMissmatch))
+                .map(|expr| eval_lhs_and_check!(program, expr, arr_type, ArrayMissmatch))
                 .collect::<Result<_, _>>()?;
 
             CheckedSimpleExpression::ArrayLiteral {
@@ -811,14 +861,54 @@ pub fn typecheck_simple_expression(
                 type_id: arr_type,
             }
         }
-        SimpleExpression::FunctionCall { name, arguments } => todo!(),
-        SimpleExpression::StructLiteral(_) => todo!(),
-        SimpleExpression::Parentheses { inner } => todo!(),
-        SimpleExpression::StateAccess { name } => todo!(),
+        SimpleExpression::FunctionCall { name, arguments } => {
+            let function = program
+                .functions
+                .get(&name)
+                .ok_or_else(|| UndefinedFunction { name })?;
+
+            if arguments.len() != function.params.len() {
+                return Err(FunctionArgumentCount {
+                    func_name: function.name.to_string(),
+                    arg_count: arguments.len(),
+                    param_count: function.params.len(),
+                });
+            }
+
+            let arguments = function
+                .params
+                .iter()
+                .zip(arguments.into_iter())
+                .map(|(param, arg)| {
+                    eval_lhs_and_check!(
+                        program,
+                        arg,
+                        param,
+                        ParamArgMissmatch,
+                        [("function", function.name)]
+                    )
+                })
+                .collect::<Result<_, _>>()?;
+
+            CheckedSimpleExpression::FunctionCall {
+                name: function.name,
+                arguments,
+                type_id: function.return_type,
+            }
+        }
+        SimpleExpression::StructLiteral(structure) => todo!("I'm not sure if I want to allow {{a: 2}} or {{a: int = 2}} literals without a type name, or just c-style literals."),
+        SimpleExpression::Parentheses { inner } => CheckedSimpleExpression::Parentheses{ inner: Box::new(typecheck_expression(program, *inner)?)},
+        SimpleExpression::StateAccess { name } => {
+            let type_id = program.structs.get("state").expect("Parser should ensure state struct is defined.").type_of_field(&name)?;
+
+            CheckedSimpleExpression::StateAccess { name, type_id }
+        }
         SimpleExpression::ExecutionAccess {
             execution,
             access_expression,
-        } => todo!(),
-        SimpleExpression::BindingAccess { name } => todo!(),
+        } => {
+            CheckedSimpleExpression::ExecutionAccess{ execution, access_expression: Box::new(typecheck_access_expression(program, *access_expression)?) }
+        }
+        SimpleExpression::BindingAccess { name } => todo!("Needs scope at compile-time"),
     })
 }

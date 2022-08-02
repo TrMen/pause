@@ -22,6 +22,7 @@ access_expression = simple_expression
                     | simple_expression '.' access_expression
                     | simple_expression '[' expression ']'
                     | simple_expression '[' expression ']' access_expression
+                    | identifier
 
 simple_expression = function_call | value | state_access | binding_access | execution_access
 

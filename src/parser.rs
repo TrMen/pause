@@ -8,41 +8,20 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Indirection {
-    Field(String),
-    Subscript(Box<Expression>),
-    // TODO: Add function calls
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EvaluatedIndirection {
-    Field(String),
-    Subscript(usize),
-    // TODO: Add function calls
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvaluatedAccessPath {
-    pub name: String,
-    pub indirections: Vec<EvaluatedIndirection>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub enum SimpleExpression {
     Boolean(bool),
     String(String),
     NumberLiteral(u64),
     StructLiteral(Struct),
     ArrayLiteral(Vec<Expression>),
-    StateAccess {
-        // Difference between binding access and state access is that state starts with .
-        name: String,
-    },
     ExecutionAccess {
         execution: ExecutionDesignator,
         access_expression: Box<AccessExpression>,
     },
     BindingAccess {
+        name: String,
+    },
+    StateAccess {
         name: String,
     },
     FunctionCall {
@@ -65,17 +44,15 @@ pub enum Expression {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum AccessExpression {
-    Subscript {
-        lhs: SimpleExpression,
-        index_expr: Box<Expression>,
-        rest: Option<Box<AccessExpression>>,
-    },
-    FieldAccess {
-        lhs: SimpleExpression,
-        rest: Box<AccessExpression>,
-    },
-    Simple(SimpleExpression),
+pub enum Indirection {
+    Subscript { index_expr: Expression },
+    Field { field_name: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccessExpression {
+    pub lhs: SimpleExpression,
+    pub indirections: Vec<Indirection>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -616,7 +593,7 @@ impl Parser {
                     // TODO: Check that lhs is state assignment (prolly needs to happen at runtime
                     // fro now)
                     Statement::StateAssignment {
-                        lhs: *lhs,
+                        lhs,
                         assign_op,
                         rhs,
                     }
@@ -657,53 +634,32 @@ impl Parser {
         if let Some(op) = extract_if_kind_matches!(self, TokenKind::BinaryOp)? {
             let rhs = Box::new(self.expression()?);
 
-            Ok(Expression::Binary { lhs: *lhs, op, rhs })
+            Ok(Expression::Binary { lhs, op, rhs })
         } else {
-            Ok(Expression::Access(*lhs))
+            Ok(Expression::Access(lhs))
         }
     }
 
-    fn access_expression(&mut self) -> ParseResult<Box<AccessExpression>> {
-        // TODO: Allow only .<ident>, not .<any_expr>
+    fn access_expression(&mut self) -> ParseResult<AccessExpression> {
         let lhs = self.simple_expression()?;
 
-        if advance_if_matches!(self, TokenKind::Dot)?.is_some() {
-            Ok(Box::new(AccessExpression::FieldAccess {
-                lhs,
-                rest: self.access_expression()?,
-            }))
-        } else if advance_if_matches!(self, TokenKind::LeftBracket)?.is_some() {
-            let index_expr = Box::new(self.expression()?);
+        let mut indirections = Vec::new();
 
-            self.expect(TokenKind::RightBrace)?;
-
-            let old_index = self.index;
-
-            let rest = self.access_expression();
-
-            // In case of dot, we want one trailing expression to be picked up,
-            // in case of array, we don't want that, so put it back.
-            // TODO: This means I don't understand what should happen here. This is a hack.
-            if rest.is_err()
-                || !matches!(self.peek()?.kind, TokenKind::Dot | TokenKind::LeftBracket)
-            {
-                self.index = old_index;
-                Ok(Box::new(AccessExpression::Subscript {
-                    lhs,
-                    index_expr,
-                    rest: None,
-                }))
+        while matches!(self.peek()?.kind, TokenKind::Dot | TokenKind::LeftBracket) {
+            if advance_if_matches!(self, TokenKind::Dot)?.is_some() {
+                indirections.push(Indirection::Field {
+                    field_name: self.expect(TokenKind::Identifier)?.lexeme.to_string(),
+                })
+            } else if advance_if_matches!(self, TokenKind::LeftBracket)?.is_some() {
+                let index_expr = self.expression()?;
+                self.expect(TokenKind::RightBrace)?;
+                indirections.push(Indirection::Subscript { index_expr });
             } else {
-                Ok(Box::new(AccessExpression::Subscript {
-                    lhs,
-                    index_expr,
-                    rest: Some(rest.unwrap()),
-                }))
+                panic!("Should be caught by matches! above");
             }
-        } else {
-            // Recursion done
-            Ok(Box::new(AccessExpression::Simple(lhs)))
         }
+
+        Ok(AccessExpression { lhs, indirections })
     }
 
     fn simple_expression(&mut self) -> ParseResult<SimpleExpression> {
@@ -758,7 +714,7 @@ impl Parser {
                 // Must be state access expression after execution designation
                 self.expect(TokenKind::Dot)?;
 
-                let access_expression = self.access_expression()?;
+                let access_expression = Box::new(self.access_expression()?);
 
                 Ok(SimpleExpression::ExecutionAccess {
                     execution,

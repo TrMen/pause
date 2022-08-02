@@ -2,10 +2,7 @@ use thiserror::Error;
 
 use crate::{
     lexer::{AssignOp, ExecutionDesignator},
-    parser::{
-        AccessPath, EvaluatedAccessPath, EvaluatedIndirection, Expression, Indirection, ParsedType,
-        Program, SimpleExpression, Statement,
-    },
+    parser::{Expression, Indirection, ParsedType, Program, SimpleExpression, Statement},
 };
 
 #[derive(Error, Debug)]
@@ -33,39 +30,12 @@ pub enum InterpretationError {
     OutOfProgramBounds(usize),
     #[error("Unexpected end of program for execution '{0:?}'")]
     UnexpectedDone(ExecutionDesignator),
-    #[error("Invalid conversion from type '{from}' to '{to}'")]
-    InvalidTypeConversion { from: String, to: String }, // TODO: Should be some enum or int identifying types, rather than a string
-    #[error("Value returned from function has incorrect type '{actual}'. Expected '{expected}'")]
-    ReturnTypeMissmatch { expected: String, actual: String }, // TODO: Should be some enum or int identifying types, rather than a string
-    #[error("Trying to assign value '{value:#?}' of type '{actual}' to field or binding of type '{expected}'")]
-    AssignmentTypeMissmatch {
-        value: RuntimeValue,
-        expected: String,
-        actual: String,
-    }, // TODO: Should be some enum or int identifying types, rather than a string
-    #[error("Incorrect argument type for '{param_name}: {expected_type}' in call to function '{func_name}'. Argument is '{actual_val:#?}' of type '{actual_type}'")]
-    FunctionArgumentTypeMissmatch {
-        func_name: String,
-        param_name: String,
-        expected_type: String,
-        actual_val: RuntimeValue,
-        actual_type: String,
-    }, //
     #[error("Incorrect number of arguments for call to function '{name}'. Expected '{expected}' arguments, got '{actual}'.")]
     MissmatchedArity {
         name: String,
         expected: usize,
         actual: usize,
     },
-    #[error("Trying to access array with index value '{value:#?}' of type '{type_name}'. Only integers are allowed.")]
-    ArrayIndexTypeError {
-        value: RuntimeValue,
-        type_name: String,
-    },
-    #[error("Trying to access value '{value:#?}' as if it were an array.")]
-    ArrayTypeError { value: RuntimeValue },
-    #[error("Trying to access value '{value:#?}' as if it were a struct.")]
-    RuntimeStructTypeError { value: RuntimeValue },
     #[error("Out of bounds array access on '{:#?}'. Index: '{index}'")]
     OutOfBoundsArrayAccess { array: RuntimeValue, index: usize },
 }
@@ -110,7 +80,8 @@ pub enum RuntimeValue {
     String(String),
     Number(u64),
     Array(Vec<RuntimeValue>),
-    RuntimeStruct(RuntimeStruct),
+    Struct(RuntimeStruct),
+    Bool(bool),
 }
 
 impl RuntimeValue {
@@ -120,10 +91,7 @@ impl RuntimeValue {
 
         match self {
             RuntimeValue::Bool(boolean) => Ok(*boolean),
-            _ => Err(InterpretationError::InvalidTypeConversion {
-                from: self.type_name().to_string(),
-                to: RuntimeValue::Bool(true).type_name().to_string(),
-            }),
+            _ => panic!("Oboi"),
         }
     }
 
