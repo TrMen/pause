@@ -5,7 +5,6 @@ use std::{backtrace::Backtrace, collections::HashMap};
 use crate::{
     interpreter::{InterpretationError, InterpretationResult},
     lexer::{AssignOp, BinaryOp, ExecutionDesignator, Token, TokenKind},
-    typechecker::BuildinType,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,42 +28,54 @@ pub struct EvaluatedAccessPath {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct AccessPath {
-    pub name: String,
-    pub indirections: Vec<Indirection>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub enum SimpleExpression {
     Boolean(bool),
     String(String),
     NumberLiteral(u64),
     StructLiteral(Struct),
     ArrayLiteral(Vec<Expression>),
-    ArrayAccess {
-        target: Box<Expression>,
-        index: Box<Expression>,
+    StateAccess {
+        // Difference between binding access and state access is that state starts with .
+        name: String,
     },
-    StateAccess(AccessPath),
     ExecutionAccess {
         execution: ExecutionDesignator,
-        path: AccessPath,
+        access_expression: Box<AccessExpression>,
     },
-    BindingAccess(AccessPath),
+    BindingAccess {
+        name: String,
+    },
     FunctionCall {
         name: String,
         arguments: Vec<Expression>,
+    },
+    Parentheses {
+        inner: Box<Expression>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
-    Simple(SimpleExpression),
+    Access(AccessExpression),
     Binary {
-        lhs: SimpleExpression,
+        lhs: AccessExpression,
         op: BinaryOp,
         rhs: Box<Expression>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AccessExpression {
+    Subscript {
+        lhs: SimpleExpression,
+        index_expr: Box<Expression>,
+        rest: Option<Box<AccessExpression>>,
+    },
+    FieldAccess {
+        lhs: SimpleExpression,
+        rest: Box<AccessExpression>,
+    },
+    Simple(SimpleExpression),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -76,7 +87,7 @@ pub enum Statement {
         name: String,
     },
     StateAssignment {
-        lhs: AccessPath,
+        lhs: AccessExpression,
         assign_op: AssignOp,
         rhs: Expression,
     },
@@ -147,38 +158,7 @@ pub struct Program {
 impl Program {
     // This really shouldn't be here, but instead done at compile-time
     pub fn ensure_uses_defined_components(&self, stmt: &Statement) -> InterpretationResult<()> {
-        match stmt {
-            Statement::AssertionCall { name } => {
-                self.assertions
-                    .contains_key(name)
-                    .then_some(())
-                    .ok_or_else(|| InterpretationError::UnknownAssertion(name.to_string()))?
-            }
-            Statement::StateAssignment { .. } => (), // TODO: actually check this
-            Statement::Expression(expression) => match expression {
-                Expression::Simple(simple) => match simple {
-                    SimpleExpression::StateAccess(_) => todo!(),
-                    SimpleExpression::ExecutionAccess { execution, path } => todo!(),
-                    SimpleExpression::FunctionCall { name, arguments } => todo!(),
-                    SimpleExpression::BindingAccess(_) => todo!(),
-                    SimpleExpression::ArrayLiteral(_) => todo!(),
-                    SimpleExpression::ArrayAccess { target, index } => todo!(),
-                    SimpleExpression::Boolean(_) => todo!(),
-                    SimpleExpression::String(_) => todo!(),
-                    SimpleExpression::NumberLiteral(_) => todo!(),
-                    SimpleExpression::StructLiteral(_) => todo!(),
-                },
-                Expression::Binary { .. } => todo!(),
-            },
-            Statement::ProcedureCall { name } => {
-                self.procedures
-                    .contains_key(name)
-                    .then_some(())
-                    .ok_or_else(|| InterpretationError::UnknownProcedure(name.to_string()))?
-            }
-        };
-
-        Ok(())
+        todo!()
     }
 }
 
@@ -626,7 +606,7 @@ impl Parser {
                 // - 1 because the dot itself was already consumed
                 let old_index = self.index - 1;
 
-                let lhs = self.access_path()?;
+                let lhs = self.access_expression()?;
 
                 if let Some(assign_op) = extract_if_kind_matches!(self, TokenKind::AssignOp)? {
                     let rhs = self.expression()?;
@@ -636,7 +616,7 @@ impl Parser {
                     // TODO: Check that lhs is state assignment (prolly needs to happen at runtime
                     // fro now)
                     Statement::StateAssignment {
-                        lhs,
+                        lhs: *lhs,
                         assign_op,
                         rhs,
                     }
@@ -672,42 +652,64 @@ impl Parser {
     }
 
     fn expression(&mut self) -> ParseResult<Expression> {
-        let lhs = self.simple_expression()?;
+        let lhs = self.access_expression()?;
 
         if let Some(op) = extract_if_kind_matches!(self, TokenKind::BinaryOp)? {
             let rhs = Box::new(self.expression()?);
 
-            Ok(Expression::Binary { lhs, op, rhs })
+            Ok(Expression::Binary { lhs: *lhs, op, rhs })
         } else {
-            Ok(Expression::Simple(lhs))
+            Ok(Expression::Access(*lhs))
         }
     }
 
-    fn access_path(&mut self) -> ParseResult<AccessPath> {
-        let name = self.expect(TokenKind::Identifier)?.lexeme.clone();
+    fn access_expression(&mut self) -> ParseResult<Box<AccessExpression>> {
+        // TODO: Allow only .<ident>, not .<any_expr>
+        let lhs = self.simple_expression()?;
 
-        let mut indirections = Vec::new();
-        loop {
-            if advance_if_matches!(self, TokenKind::Dot)?.is_some() {
-                let field = self.expect(TokenKind::Identifier)?;
-                indirections.push(Indirection::Field(field.lexeme.clone()));
-            } else if advance_if_matches!(self, TokenKind::LeftBracket)?.is_some() {
-                let index = Box::new(self.expression()?);
-                self.expect(TokenKind::RightBracket)?;
+        if advance_if_matches!(self, TokenKind::Dot)?.is_some() {
+            Ok(Box::new(AccessExpression::FieldAccess {
+                lhs,
+                rest: self.access_expression()?,
+            }))
+        } else if advance_if_matches!(self, TokenKind::LeftBracket)?.is_some() {
+            let index_expr = Box::new(self.expression()?);
 
-                indirections.push(Indirection::Subscript(index));
+            self.expect(TokenKind::RightBrace)?;
+
+            let old_index = self.index;
+
+            let rest = self.access_expression();
+
+            // In case of dot, we want one trailing expression to be picked up,
+            // in case of array, we don't want that, so put it back.
+            // TODO: This means I don't understand what should happen here. This is a hack.
+            if rest.is_err()
+                || !matches!(self.peek()?.kind, TokenKind::Dot | TokenKind::LeftBracket)
+            {
+                self.index = old_index;
+                Ok(Box::new(AccessExpression::Subscript {
+                    lhs,
+                    index_expr,
+                    rest: None,
+                }))
             } else {
-                break;
+                Ok(Box::new(AccessExpression::Subscript {
+                    lhs,
+                    index_expr,
+                    rest: Some(rest.unwrap()),
+                }))
             }
+        } else {
+            // Recursion done
+            Ok(Box::new(AccessExpression::Simple(lhs)))
         }
-
-        Ok(AccessPath { name, indirections })
     }
 
     fn simple_expression(&mut self) -> ParseResult<SimpleExpression> {
         let next = self.advance()?.clone();
 
-        let simple_expression = match next.kind {
+        Ok(match next.kind {
             TokenKind::LeftBracket => {
                 let array = collect_list!(
                     self,
@@ -727,7 +729,9 @@ impl Parser {
             TokenKind::True => Ok(SimpleExpression::Boolean(true)),
             TokenKind::False => Ok(SimpleExpression::Boolean(false)),
             // TODO: Allow struct literals here
-            TokenKind::Dot => Ok(SimpleExpression::StateAccess(self.access_path()?)),
+            TokenKind::Dot => Ok(SimpleExpression::StateAccess {
+                name: self.expect(TokenKind::Identifier)?.lexeme.to_string(),
+            }),
             TokenKind::Identifier => {
                 if advance_if_matches!(self, TokenKind::LeftParen)?.is_some() {
                     // Function call
@@ -743,35 +747,27 @@ impl Parser {
                         arguments,
                     })
                 } else {
-                    // Pub back the identifier
-                    self.go_back();
-                    Ok(SimpleExpression::BindingAccess(self.access_path()?))
+                    Ok(SimpleExpression::BindingAccess {
+                        name: next.lexeme.to_string(),
+                    })
                 }
             }
             TokenKind::ExecutionDesignator(execution) => {
                 self.expect(TokenKind::Colon)?;
-                self.expect(TokenKind::Dot)?;
-                let path = self.access_path()?;
 
-                Ok(SimpleExpression::ExecutionAccess { execution, path })
+                // Must be state access expression after execution designation
+                self.expect(TokenKind::Dot)?;
+
+                let access_expression = self.access_expression()?;
+
+                Ok(SimpleExpression::ExecutionAccess {
+                    execution,
+                    access_expression,
+                })
             }
 
             _ => unexpected("Value or identifer access", &next)?,
-        }?;
-
-        // TODO: There's no way this is enough. Array access needs proper precedence parsing :<
-        if advance_if_matches!(self, TokenKind::LeftBracket)?.is_some() {
-            let index = Box::new(self.expression()?);
-
-            self.expect(TokenKind::RightBracket)?;
-
-            Ok(SimpleExpression::ArrayAccess {
-                target: Box::new(Expression::Simple(simple_expression)),
-                index,
-            })
-        } else {
-            Ok(simple_expression)
-        }
+        }?)
     }
 }
 

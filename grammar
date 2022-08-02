@@ -10,21 +10,27 @@ function = 'function' identifier '(' params ')' '->' type_name '{' expression '}
 
 params = identifier ':' type_name [','] | identifier ':' type_name ',' params
 procedure_body = statement...
-statement = procedure_call | assertion_statement | expression ';' | expression assign_op expression ';'
+
+statement = procedure_call | assertion_statement | state_assignment | expression ';'
+state_assignment = '.' access_expression assign_op expression ';'
 procedure_call_ = '..' identifier ';'
 assertion_statement = '!' identifier ';' 
 
-expression = simple_expression | simple_expression binary_operator expression 
-simple_expression = function_call | value | state_access | binding_access | execution_access | array_access
+expression = access_expression | access_expression binary_operator expression 
+
+access_expression = simple_expression
+                    | simple_expression '.' access_expression
+                    | simple_expression '[' expression ']'
+                    | simple_expression '[' expression ']' access_expression
+
+simple_expression = function_call | value | state_access | binding_access | execution_access
 
 execution_access = execution_designator ':' state_access
+state_access = '.' access_expression
+binding_access = identifier
+
 function_call = identifier '(' arguments ')'
 arguments = expression [','] | expression ',' arguments
-
-state_access = '.' identifier_or_array_access | '.' identifier state_access
-binding_access = identifier_or_array_access | identifier '.' binding_access
-identifier_or_array_access = identifier | array_access
-array_access = expression '[' expression ']'
 
 expression_list = expression [','] | expression ',' expression_list
 
