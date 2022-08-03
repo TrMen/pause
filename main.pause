@@ -3,6 +3,7 @@ struct state {
     stored: u64 = 0,
     s: some_struct = {},
     others: [u64] = [],
+    others_copy: [u64] = [],
 }
 
 struct some_struct {
@@ -74,4 +75,10 @@ procedure main {
     .others = [];
 
     .s.num = 2;
+
+    for .others {
+        // O(len(.others))
+        .others_copy[idx] = it;
+    }
+
 }

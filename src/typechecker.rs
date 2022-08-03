@@ -334,6 +334,16 @@ impl DefinedTypes {
         self.generic_types.last().unwrap()
     }
 
+    fn is_instance_of(&self, instance: TypeId, generic: GenericId) -> bool {
+        if let TypeDescription::GenericInstance {generic_id, ..} = self.get_type_description(instance) 
+            && generic_id == generic {
+            true
+        }
+        else {
+            false
+        }
+    }
+
     fn get_generic(&self, name: &str) -> TypeCheckResult<GenericId> {
         self.generic_types
             .iter()
@@ -351,9 +361,8 @@ impl DefinedTypes {
             && rhs == self.get_struct("<empty_struct>").unwrap() {
             true
         }
-        else if let TypeDescription::GenericInstance {generic_id: generic_id_lhs, ..} = self.get_type_description(lhs)
-            && let TypeDescription::GenericInstance { generic_id: generic_id_rhs, type_arguments: type_arguments_rhs } = self.get_type_description(rhs)
-            && generic_id_lhs == self.get_generic("array").unwrap()
+        else if self.is_instance_of(lhs, self.get_generic("array").unwrap()) && 
+            let TypeDescription::GenericInstance { generic_id: generic_id_rhs, type_arguments: type_arguments_rhs } = self.get_type_description(rhs)
             && generic_id_rhs == self.get_generic("array").unwrap()
             && *type_arguments_rhs.first().unwrap() == TypeId::unknown(){
                 // rhs is an empty array literal, and lhs is any array type
@@ -570,6 +579,10 @@ pub enum CheckedStatement {
         rhs: CheckedExpression,
     },
     Expression(CheckedExpression),
+    For {
+        iterator: CheckedExpression,
+        body: Vec<CheckedStatement>,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -679,6 +692,13 @@ pub enum TypeCheckError {
         expr: AccessExpression,
         expr_type: String,
     },
+    #[error(
+        "Trying to iterate over expression '{:#?}' of type '{type_name}'. Only arrays can be iterated over"
+    )]
+    NonArrayIteration {
+        type_name: String,
+        expr: CheckedExpression,
+    }
 }
 
 use TypeCheckError::*;
@@ -1072,6 +1092,30 @@ pub fn typecheck_statement(
         }
         Statement::Expression(expression) => {
             CheckedStatement::Expression(typecheck_expression(program, types, scope, expression)?)
+        }
+        Statement::For { iterator, body } => {
+            let iterator = typecheck_expression(program, types, scope, iterator)?;
+
+            if let TypeDescription::GenericInstance { generic_id, type_arguments } = types.get_type_description(iterator.type_id())
+                && generic_id == types.get_generic("aray").unwrap() {
+
+                let bindings = vec![Binding {name: "it".to_string(), type_id: *type_arguments.first().unwrap()},
+                                    Binding {name: "idx".to_string(), type_id: TypeId::builtin("u64") }];
+
+                let for_scope = scope.inner_with_bindings(bindings);
+
+                let body = body.into_iter().map(|statement| {
+                    typecheck_statement(program, types, &for_scope, statement)
+                }).collect::<Result<_,_>>()?;
+
+                CheckedStatement::For { iterator, body }
+            }
+            else {
+                return err!(NonArrayIteration {
+                    type_name: types.type_name(iterator.type_id()),
+                    expr: iterator,
+                });
+            }
         }
     })
 }

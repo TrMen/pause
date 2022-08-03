@@ -69,6 +69,10 @@ pub enum Statement {
         rhs: Expression,
     },
     Expression(Expression),
+    For {
+        iterator: Expression,
+        body: Vec<Statement>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -130,13 +134,6 @@ pub struct Program {
     pub functions: HashMap<String, Function>,
     pub structs: HashMap<String, Struct>,
     pub main: Procedure,
-}
-
-impl Program {
-    // This really shouldn't be here, but instead done at compile-time
-    //     pub fn ensure_uses_defined_components(&self, stmt: &Statement) -> InterpretationResult<()> {
-    //         todo!()
-    //     }
 }
 
 #[derive(Debug, Clone, Error)]
@@ -237,6 +234,16 @@ macro_rules! collect_list {
             stringify!($terminator)
         )
     };
+
+    ($self:ident, $parser:expr, $terminator:pat) => {{
+        let mut list = Vec::new();
+
+        while advance_if_matches!($self, $terminator)?.is_none() {
+            list.push($parser($self)?);
+        }
+
+        Ok(list)
+    }};
 
     ($self:ident, $parser:expr, $separator:pat, $terminator:pat, $string_terminator:expr) => {{
         let mut list = Vec::new();
@@ -566,11 +573,11 @@ impl Parser {
 
         self.expect(TokenKind::LeftBrace)?;
 
-        let mut body = Vec::new();
-
-        while advance_if_matches!(self, TokenKind::RightBrace)?.is_none() {
-            body.push(self.statement()?);
-        }
+        let body = collect_list!(
+            self,
+            |this: &mut Self| this.statement(),
+            TokenKind::RightBrace
+        )?;
 
         self.define_procedure(name, body)?;
 
@@ -581,6 +588,19 @@ impl Parser {
         let next = self.advance()?.clone();
 
         Ok(match next.kind {
+            TokenKind::For => {
+                let iterator = self.expression()?;
+
+                self.expect(TokenKind::LeftBrace)?;
+
+                let body = collect_list!(
+                    self,
+                    |this: &mut Self| this.statement(),
+                    TokenKind::RightBrace
+                )?;
+
+                Statement::For { iterator, body }
+            }
             TokenKind::Bang => self.assertion_statement()?,
             // TODO: This should be extracted into a function somehow
             TokenKind::DotDot => self.procedure_call_statement()?,

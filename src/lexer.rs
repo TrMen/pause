@@ -35,6 +35,7 @@ pub enum TokenKind {
     DotDot,
     Struct,
     Dot,
+    For,
     Slash,
     Colon,
     Comma,
@@ -158,6 +159,7 @@ impl<'a> Lexer<'a> {
             b't' => return Some(self.keyword_or_identifier("rue", TokenKind::True)),
             b'f' => match self.advance()? {
                 b'a' => return Some(self.keyword_or_identifier("lse", TokenKind::False)),
+                b'o' => return Some(self.keyword_or_identifier("r", TokenKind::For)),
                 b'u' => return Some(self.keyword_or_identifier("nction", TokenKind::Function)),
                 _ => return Some(self.identifier()),
             },
