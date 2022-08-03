@@ -2,7 +2,7 @@ use thiserror::Error;
 
 use crate::{
     lexer::{AssignOp, ExecutionDesignator},
-    parser::{Expression, Indirection, ParsedType, Program, SimpleExpression, Statement},
+    typechecker::{CheckedAccessExpression, CheckedIndirection},
 };
 
 #[derive(Error, Debug)]
@@ -115,9 +115,7 @@ impl RuntimeValue {
                     index,
                 })?)
         } else {
-            Err(InterpretationError::ArrayTypeError {
-                value: self.clone(),
-            })
+            panic!();
         }
     }
 
@@ -133,9 +131,7 @@ impl RuntimeValue {
                     index,
                 })?)
         } else {
-            Err(InterpretationError::ArrayTypeError {
-                value: self.clone(),
-            })
+            panic!();
         }
     }
 
@@ -144,9 +140,7 @@ impl RuntimeValue {
         if let RuntimeValue::Struct(structure) = self {
             structure.get_field(name).map(|field| &field.value)
         } else {
-            Err(InterpretationError::StructTypeError {
-                value: self.clone(),
-            })
+            panic!()
         }
     }
 
@@ -155,21 +149,22 @@ impl RuntimeValue {
         if let RuntimeValue::Struct(structure) = self {
             structure.get_field_mut(name).map(|field| &mut field.value)
         } else {
-            Err(InterpretationError::StructTypeError {
-                value: self.clone(),
-            })
+            panic!();
         }
     }
 
-    pub fn access_path(&self, path: &EvaluatedAccessPath) -> InterpretationResult<&RuntimeValue> {
+    pub fn access_path(
+        &self,
+        path: &CheckedAccessExpression,
+    ) -> InterpretationResult<&RuntimeValue> {
         let mut value = self;
 
         for indirection in &path.indirections {
             match indirection {
-                EvaluatedIndirection::Field(field_name) => {
+                CheckedIndirection::Field { field_name } => {
                     value = value.access_field(field_name)?;
                 }
-                EvaluatedIndirection::Subscript(index) => {
+                CheckedIndirection::Subscript { index_expr } => {
                     value = value.access_array(*index)?;
                 }
             }

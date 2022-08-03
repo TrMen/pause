@@ -2,17 +2,17 @@ use thiserror::Error;
 
 use std::{backtrace::Backtrace, collections::HashMap};
 
-use crate::{
-    interpreter::{InterpretationError, InterpretationResult},
-    lexer::{AssignOp, BinaryOp, ExecutionDesignator, Token, TokenKind},
-};
+use crate::lexer::{AssignOp, BinaryOp, ExecutionDesignator, Token, TokenKind};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SimpleExpression {
     Boolean(bool),
     String(String),
     NumberLiteral(u64),
-    StructLiteral(Struct),
+    StructLiteral {
+        name: Option<String>,
+        fields: Vec<StructField>,
+    },
     ArrayLiteral(Vec<Expression>),
     ExecutionAccess {
         execution: ExecutionDesignator,
@@ -134,9 +134,9 @@ pub struct Program {
 
 impl Program {
     // This really shouldn't be here, but instead done at compile-time
-    pub fn ensure_uses_defined_components(&self, stmt: &Statement) -> InterpretationResult<()> {
-        todo!()
-    }
+    //     pub fn ensure_uses_defined_components(&self, stmt: &Statement) -> InterpretationResult<()> {
+    //         todo!()
+    //     }
 }
 
 #[derive(Debug, Clone, Error)]
@@ -167,7 +167,7 @@ use ParseError::*;
 #[error("{error}")]
 pub struct ParseErrorWrapper {
     pub error: ParseError,
-    backtrace: std::backtrace::Backtrace,
+    pub backtrace: std::backtrace::Backtrace,
 }
 
 macro_rules! err {
@@ -353,7 +353,7 @@ impl Parser {
         };
 
         if name == "main" {
-            self.main = Some(proc.clone());
+            self.main = Some(proc);
         } else {
             self.procedures.insert(name, proc);
         }
@@ -461,15 +461,14 @@ impl Parser {
             self,
             |this: &mut Self| {
                 let name = this.expect(TokenKind::Identifier)?.lexeme.clone();
+
                 this.expect(TokenKind::Colon)?;
 
                 let parsed_type = this.parsed_type()?;
 
                 this.expect(TokenKind::AssignOp(AssignOp::Equal))?;
 
-                let next = this.advance()?;
-
-                let initializer = self.expression()?;
+                let initializer = this.expression()?;
 
                 println!("{}: {:?} = {:?}", name, parsed_type, initializer);
 
@@ -494,9 +493,16 @@ impl Parser {
         let next = self.advance()?;
         match next.kind {
             TokenKind::LeftBracket => {
-                let inner = Box::new(self.parsed_type()?);
-                self.expect(TokenKind::RightBracket)?;
-                Ok(ParsedType::Array { inner })
+                // TODO: Allow nested array types.
+                if advance_if_matches!(self, TokenKind::RightBracket)?.is_some() {
+                    Ok(ParsedType::Array {
+                        inner: Box::new(ParsedType::Unknown),
+                    })
+                } else {
+                    let inner = Box::new(self.parsed_type()?);
+                    self.expect(TokenKind::RightBracket)?;
+                    Ok(ParsedType::Array { inner })
+                }
             }
             TokenKind::Identifier => Ok(ParsedType::Simple {
                 name: next.lexeme.to_string(),
@@ -583,6 +589,9 @@ impl Parser {
                 // - 1 because the dot itself was already consumed
                 let old_index = self.index - 1;
 
+                // let the expr parse the dot
+                self.go_back();
+
                 let lhs = self.access_expression()?;
 
                 if let Some(assign_op) = extract_if_kind_matches!(self, TokenKind::AssignOp)? {
@@ -590,8 +599,6 @@ impl Parser {
 
                     self.expect(TokenKind::SemiColon)?;
 
-                    // TODO: Check that lhs is state assignment (prolly needs to happen at runtime
-                    // fro now)
                     Statement::StateAssignment {
                         lhs,
                         assign_op,
@@ -652,7 +659,7 @@ impl Parser {
                 })
             } else if advance_if_matches!(self, TokenKind::LeftBracket)?.is_some() {
                 let index_expr = self.expression()?;
-                self.expect(TokenKind::RightBrace)?;
+                self.expect(TokenKind::RightBracket)?;
                 indirections.push(Indirection::Subscript { index_expr });
             } else {
                 panic!("Should be caught by matches! above");
@@ -665,7 +672,13 @@ impl Parser {
     fn simple_expression(&mut self) -> ParseResult<SimpleExpression> {
         let next = self.advance()?.clone();
 
-        Ok(match next.kind {
+        match next.kind {
+            TokenKind::LeftParen => {
+                let inner = Box::new(self.expression()?);
+                self.expect(TokenKind::RightParen)?;
+
+                Ok(SimpleExpression::Parentheses { inner })
+            }
             TokenKind::LeftBracket => {
                 let array = collect_list!(
                     self,
@@ -681,13 +694,22 @@ impl Parser {
             TokenKind::Number => Ok(SimpleExpression::NumberLiteral(
                 str::parse(&next.lexeme).unwrap(),
             )),
-            TokenKind::String => Ok(SimpleExpression::String(next.lexeme.to_string())),
+            TokenKind::String => Ok(SimpleExpression::String(next.lexeme)),
             TokenKind::True => Ok(SimpleExpression::Boolean(true)),
             TokenKind::False => Ok(SimpleExpression::Boolean(false)),
             // TODO: Allow struct literals here
             TokenKind::Dot => Ok(SimpleExpression::StateAccess {
                 name: self.expect(TokenKind::Identifier)?.lexeme.to_string(),
             }),
+            TokenKind::LeftBrace => {
+                // TODO: Add more than just empty struct literals.
+                self.expect(TokenKind::RightBrace)?;
+
+                Ok(SimpleExpression::StructLiteral {
+                    name: None,
+                    fields: Vec::new(),
+                })
+            }
             TokenKind::Identifier => {
                 if advance_if_matches!(self, TokenKind::LeftParen)?.is_some() {
                     // Function call
@@ -703,9 +725,7 @@ impl Parser {
                         arguments,
                     })
                 } else {
-                    Ok(SimpleExpression::BindingAccess {
-                        name: next.lexeme.to_string(),
-                    })
+                    Ok(SimpleExpression::BindingAccess { name: next.lexeme })
                 }
             }
             TokenKind::ExecutionDesignator(execution) => {
@@ -723,7 +743,7 @@ impl Parser {
             }
 
             _ => unexpected("Value or identifer access", &next)?,
-        }?)
+        }
     }
 }
 

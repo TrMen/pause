@@ -4,6 +4,8 @@ use std::{
     hash::Hash,
 };
 
+use std::backtrace::Backtrace;
+
 use thiserror::Error;
 
 use crate::{
@@ -14,20 +16,36 @@ use crate::{
     },
 };
 
+macro_rules! err {
+    ($error:expr) => {
+        Err(TypeCheckErrorWrapper {
+            error: $error,
+            backtrace: Backtrace::force_capture(),
+        })
+    };
+}
+
+macro_rules! wrap {
+    ($error:expr) => {
+        TypeCheckErrorWrapper {
+            error: $error,
+            backtrace: Backtrace::force_capture(),
+        }
+    };
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct TypeId {
     id: usize,
 }
 
-impl PartialEq for TypeId {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
 impl TypeId {
-    fn new(id: usize) -> Self {
-        Self { id }
+    fn is_compatible_with(&self, other: TypeId) -> bool {
+        if self.id == TypeId::unchecked().id || other.id == TypeId::unchecked().id {
+            true
+        } else {
+            self.id == other.id
+        }
     }
 
     fn builtin(name: &str) -> Self {
@@ -41,6 +59,10 @@ impl TypeId {
 
     fn unknown() -> Self {
         Self { id: usize::MAX }
+    }
+
+    fn unchecked() -> Self {
+        Self { id: usize::MAX - 1 }
     }
 
     fn is_builtin(&self) -> bool {
@@ -58,13 +80,63 @@ impl Typed for TypeId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug)]
+pub struct Binding {
+    name: String,
+    type_id: TypeId,
+}
+
+impl Typed for Binding {
+    fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Scope {
+    bindings: Vec<Binding>,
+    outer: Option<Box<Scope>>,
+}
+
+// TODO: Add buildins to global scope
+static GLOBAL_SCOPE: Scope = Scope {
+    outer: None,
+    bindings: Vec::new(),
+};
+
+// TODO: Make scope a lifetime thing to avoid having deepcopy outer
+impl Scope {
+    pub fn inner_with_bindings(&self, bindings: Vec<Binding>) -> Self {
+        Self {
+            outer: Some(Box::new(self.clone())),
+            bindings,
+        }
+    }
+
+    pub fn find_binding(&self, name: &str) -> TypeCheckResult<&Binding> {
+        let outer_find = || self.outer.as_ref().map(|outer| outer.find_binding(name));
+
+        self.bindings
+            .iter()
+            .find(|binding| binding.name == name)
+            .map_or_else(outer_find, |b| Some(Ok(b)))
+            .ok_or_else(|| {
+                wrap!(UndefinedBinding {
+                    name: name.to_string(),
+                })
+            })?
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum CheckedSimpleExpression {
     Boolean(bool),
     String(String),
     NumberLiteral(u64), // TODO: Add type when more than one number type exists.
     StructLiteral {
+        type_name: Option<String>,
         fields: Vec<CheckedStructField>,
+        type_id: TypeId,
     },
     ArrayLiteral {
         elements: Vec<CheckedExpression>,
@@ -98,7 +170,17 @@ impl Typed for CheckedSimpleExpression {
             CheckedSimpleExpression::Boolean(_) => TypeId::builtin("bool"),
             CheckedSimpleExpression::String(_) => TypeId::builtin("string"),
             CheckedSimpleExpression::NumberLiteral(_) => TypeId::builtin("u64"),
-            CheckedSimpleExpression::StructLiteral { fields } => todo!(),
+            CheckedSimpleExpression::StructLiteral {
+                type_id,
+                type_name,
+                fields: _,
+            } => {
+                if type_name.is_some() {
+                    todo!("type of struct nonempty struct literals")
+                } else {
+                    *type_id
+                }
+            }
             CheckedSimpleExpression::ArrayLiteral { type_id, .. } => *type_id,
             CheckedSimpleExpression::ExecutionAccess {
                 access_expression, ..
@@ -111,7 +193,7 @@ impl Typed for CheckedSimpleExpression {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum CheckedExpression {
     Access(CheckedAccessExpression),
     Binary {
@@ -131,17 +213,17 @@ impl Typed for CheckedExpression {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum CheckedIndirection {
     Subscript { index_expr: CheckedExpression },
     Field { field_name: String },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct CheckedAccessExpression {
-    lhs: CheckedSimpleExpression,
-    indirections: Vec<CheckedIndirection>,
-    type_id: TypeId,
+    pub lhs: CheckedSimpleExpression,
+    pub indirections: Vec<CheckedIndirection>,
+    pub type_id: TypeId,
 }
 
 impl Typed for CheckedAccessExpression {
@@ -151,12 +233,12 @@ impl Typed for CheckedAccessExpression {
 }
 
 #[derive(Debug, Clone)]
-struct DefinedTypes {
+pub struct DefinedTypes {
     types: HashMap<String, TypeId>,
     next_id: usize,
 }
 
-const BUILTIN_TYPES: [&str; 5] = ["void", "bool", "u64", "string", "<unknown>"];
+const BUILTIN_TYPES: [&str; 4] = ["void", "bool", "u64", "string"];
 
 impl DefinedTypes {
     pub fn from_builtin() -> Self {
@@ -166,7 +248,7 @@ impl DefinedTypes {
             .iter()
             .map(|p| {
                 next_id += 1;
-                (p.to_string(), TypeId::new(next_id - 1))
+                (p.to_string(), TypeId { id: next_id - 1 })
             })
             .collect();
 
@@ -184,19 +266,25 @@ impl DefinedTypes {
     }
 
     pub fn get_typename(&self, id: TypeId) -> &str {
+        if id.is_compatible_with(TypeId::unknown()) {
+            return "<unknown>";
+        }
+
         // I only give out type ids from this struct, so a name must exist
         self.types
             .iter()
-            .find(|p| p.1 == &id)
-            .map(|p| &p.0)
+            .find(|p| p.1.is_compatible_with(id))
+            .map(|p| p.0)
             .unwrap()
     }
 
     pub fn get_id(&self, name: &str) -> TypeCheckResult<TypeId> {
         self.types
             .get(name)
-            .ok_or_else(|| UndefinedType {
-                name: name.to_string(),
+            .ok_or_else(|| {
+                wrap!(UndefinedType {
+                    name: name.to_string(),
+                })
             })
             .copied()
     }
@@ -213,7 +301,7 @@ impl DefinedTypes {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct CheckedStructField {
     pub name: String,
     pub type_id: TypeId,
@@ -228,7 +316,7 @@ impl Typed for CheckedStructField {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct CheckedStruct {
     pub name: String,
     pub fields: Vec<CheckedStructField>,
@@ -239,16 +327,18 @@ impl CheckedStruct {
         self.fields
             .iter()
             .find(|field| field.name == field_name)
-            .ok_or_else(|| UndefinedStructField {
-                struct_name: self.name.to_string(),
-                field_name: field_name.to_string(),
+            .ok_or_else(|| {
+                wrap!(UndefinedStructField {
+                    struct_name: self.name.to_string(),
+                    field_name: field_name.to_string(),
+                })
             })
             .map(|field| field.type_id())
     }
 }
 
 // TODO: This looks a lot like StructField. But prolly makes sense to keep them separate
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct CheckedFunctionParameter {
     pub name: String,
     pub type_id: TypeId,
@@ -274,7 +364,7 @@ pub struct CheckedAssertion {
     pub predicate: CheckedExpression,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum CheckedStatement {
     AssertionCall {
         name: String,
@@ -326,8 +416,8 @@ impl CheckedProgram {
             defined_types,
         };
 
-        for structure in program.structs {
-            program.defined_types.define_type(structure.0);
+        for structure in &program.structs {
+            program.defined_types.define_type(structure.0.clone());
         }
 
         program
@@ -337,13 +427,15 @@ impl CheckedProgram {
         let type_name = self.defined_types.get_typename(id);
 
         if id.is_builtin() {
-            return Err(BuiltinStructUse {
+            return err!(BuiltinStructUse {
                 type_name: type_name.to_string(),
             });
         }
 
-        self.structs.get(type_name).ok_or_else(|| UndefinedType {
-            name: type_name.to_string(),
+        self.structs.get(type_name).ok_or_else(|| {
+            wrap!(UndefinedType {
+                name: type_name.to_string(),
+            })
         })
     }
 }
@@ -356,6 +448,8 @@ pub enum TypeCheckError {
     FunctionReturn { common: TypeCheckErrorCommon },
     #[error("Name '{name}' is already defined in this scope. Must be unique.")]
     BindingAlreadyDefined { name: String },
+    #[error("Binding '{name}' is not defined")]
+    UndefinedBinding { name: String },
     #[error("Declared type of structure field does not match type of initializer expression. '{common}'")]
     FieldInitializerMissmatch { common: TypeCheckErrorCommon },
     #[error("Trying to assign value of incorrect type to state. '{common}'")]
@@ -386,8 +480,6 @@ pub enum TypeCheckError {
         struct_name: String,
         field_name: String,
     },
-    #[error("Trying to use expression '{expression:#?}' to as field access. Only identifiers can be used to access fields on structs.")]
-    StructFieldExpression { expression: SimpleExpression }, // Not typecheked, as we already know its wrong here without checking what it evaluates to
     #[error("Trying to use expression '{:#?}' of type '{}' to index into array. Array indexing must be done with '{}'", .common.expr, .common.actual, .common.expected)]
     ArraySubscript { common: TypeCheckErrorCommon },
     #[error("Trying to call function '{func_name}' with '{arg_count}' arguments. '{param_count}' arguments are required")]
@@ -410,6 +502,15 @@ pub struct TypeCheckErrorCommon {
     context: HashMap<String, String>,
 }
 
+#[derive(Debug, Error)]
+#[error("{error}")]
+pub struct TypeCheckErrorWrapper {
+    pub error: TypeCheckError,
+    pub backtrace: std::backtrace::Backtrace,
+}
+
+pub type TypeCheckResult<T> = Result<T, TypeCheckErrorWrapper>;
+
 impl Display for TypeCheckErrorCommon {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -420,31 +521,32 @@ impl Display for TypeCheckErrorCommon {
     }
 }
 
-fn check_unique<T>(name_iter: impl Iterator<Item = T>) -> TypeCheckResult<()>
+fn check_unique<'a, T>(name_iter: impl Iterator<Item = &'a T>) -> TypeCheckResult<()>
 where
-    T: Hash + Display + Eq,
+    T: Hash + Display + Eq + 'a,
 {
     let mut names = HashSet::new();
 
-    name_iter
-        .find(|name| !names.insert(name))
-        .map(|name| {
-            Err(BindingAlreadyDefined {
+    for name in name_iter {
+        if !names.insert(name) {
+            return err!(BindingAlreadyDefined {
                 name: name.to_string(),
-            })
-        })
-        .unwrap_or(Ok(()))
+            });
+        }
+    }
+
+    Ok(())
 }
 
 macro_rules! eval_lhs_and_check {
-    ($program:expr, $lhs:expr, $rhs:expr, $error:ident) => {{
-        let lhs_checked = typecheck_expression($program, $lhs)?;
+    ($program:expr, $scope:expr ,$lhs:expr, $rhs:expr, $error:ident) => {{
+        let lhs_checked = typecheck_expression($program, $scope, $lhs)?;
 
-        if lhs_checked.type_id() != $rhs.type_id() {
-            Err(TypeCheckError::$error {
+        if !lhs_checked.type_id().is_compatible_with($rhs.type_id()) {
+            err!(TypeCheckError::$error {
                 common: TypeCheckErrorCommon {
-                    expr: lhs_checked,
                     actual: type_name($program, lhs_checked.type_id()),
+                    expr: lhs_checked,
                     expected: type_name($program, $rhs.type_id()),
                     context: HashMap::new(),
                 },
@@ -454,19 +556,19 @@ macro_rules! eval_lhs_and_check {
         }
     }};
 
-    ($program:expr, $lhs:expr, $rhs:expr, $error:ident, $context:expr) => {{
+    ($program:expr, $scope:expr, $lhs:expr, $rhs:expr, $error:ident, $context:expr) => {{
         let context = $context
             .into_iter()
             .map(|p| (p.0.to_string(), p.1.to_string()))
             .collect();
 
-        let lhs_checked = typecheck_expression($program, $lhs)?;
+        let lhs_checked = typecheck_expression($program, $scope, $lhs)?;
 
-        if lhs_checked.type_id() != $rhs.type_id() {
-            Err(TypeCheckError::$error {
+        if !lhs_checked.type_id().is_compatible_with($rhs.type_id()) {
+            err!(TypeCheckError::$error {
                 common: TypeCheckErrorCommon {
-                    expr: lhs_checked,
                     actual: type_name($program, lhs_checked.type_id()),
+                    expr: lhs_checked,
                     expected: type_name($program, $rhs.type_id()),
                     context,
                 },
@@ -480,8 +582,6 @@ macro_rules! eval_lhs_and_check {
 pub fn type_name(program: &CheckedProgram, type_id: TypeId) -> String {
     program.defined_types.get_typename(type_id).to_string()
 }
-
-pub type TypeCheckResult<T> = Result<T, TypeCheckError>;
 
 pub fn typecheck_program(program: Program) -> TypeCheckResult<CheckedProgram> {
     // Predecl all structs so they can be used in function definitions
@@ -537,7 +637,12 @@ pub fn typecheck_program(program: Program) -> TypeCheckResult<CheckedProgram> {
     checked_program.functions = program
         .functions
         .into_iter()
-        .map(|f| Ok((f.0.clone(), typecheck_function(&checked_program, f.1)?)))
+        .map(|f| {
+            Ok((
+                f.0.clone(),
+                typecheck_function(&checked_program, &GLOBAL_SCOPE, f.1)?,
+            ))
+        })
         .collect::<Result<HashMap<_, _>, _>>()?;
 
     // Then typecheck structs since they can only use expressions (including other structs and
@@ -545,14 +650,24 @@ pub fn typecheck_program(program: Program) -> TypeCheckResult<CheckedProgram> {
     checked_program.structs = program
         .structs
         .into_iter()
-        .map(|s| Ok((s.0.clone(), typecheck_struct(&checked_program, s.1)?)))
+        .map(|s| {
+            Ok((
+                s.0.clone(),
+                typecheck_struct(&checked_program, &GLOBAL_SCOPE, s.1)?,
+            ))
+        })
         .collect::<Result<HashMap<_, _>, _>>()?;
 
     // Then check assertions since they can be used by procedures.
     checked_program.assertions = program
         .assertions
         .into_iter()
-        .map(|a| Ok((a.0.clone(), typecheck_assertion(&checked_program, a.1)?)))
+        .map(|a| {
+            Ok((
+                a.0.clone(),
+                typecheck_assertion(&checked_program, &GLOBAL_SCOPE, a.1)?,
+            ))
+        })
         .collect::<Result<HashMap<_, _>, _>>()?;
 
     // Then predecl procedures since they can refer to other procedures
@@ -574,17 +689,26 @@ pub fn typecheck_program(program: Program) -> TypeCheckResult<CheckedProgram> {
     checked_program.procedures = program
         .procedures
         .into_iter()
-        .map(|p| Ok((p.0.clone(), typecheck_procedure(&checked_program, p.1)?)))
+        .map(|p| {
+            Ok((
+                p.0.clone(),
+                typecheck_procedure(&checked_program, &GLOBAL_SCOPE, p.1)?,
+            ))
+        })
         .collect::<Result<HashMap<_, _>, _>>()?;
 
     // And finally main (is just a procedure, but may be different in the future)
-    checked_program.main = typecheck_procedure(&checked_program, program.main)?;
+    checked_program.main = typecheck_procedure(&checked_program, &GLOBAL_SCOPE, program.main)?;
 
     Ok(checked_program)
 }
 
-fn typecheck_struct(program: &CheckedProgram, structure: Struct) -> TypeCheckResult<CheckedStruct> {
-    check_unique(structure.fields.iter().map(|f| f.name))?;
+fn typecheck_struct(
+    program: &CheckedProgram,
+    scope: &Scope,
+    structure: Struct,
+) -> TypeCheckResult<CheckedStruct> {
+    check_unique(structure.fields.iter().map(|f| &f.name))?;
 
     let fields = structure
         .fields
@@ -592,6 +716,7 @@ fn typecheck_struct(program: &CheckedProgram, structure: Struct) -> TypeCheckRes
         .map(|field| {
             let initializer = eval_lhs_and_check!(
                 program,
+                scope,
                 field.initializer,
                 program.defined_types.check_parsed(&field.parsed_type)?,
                 FieldInitializerMissmatch
@@ -613,25 +738,41 @@ fn typecheck_struct(program: &CheckedProgram, structure: Struct) -> TypeCheckRes
 
 fn typecheck_function(
     program: &CheckedProgram,
+    scope: &Scope,
     function: Function,
 ) -> TypeCheckResult<CheckedFunction> {
-    check_unique(function.params.iter().map(|param| param.name))?;
+    check_unique(function.params.iter().map(|param| &param.name))?;
 
     let return_type = program.defined_types.check_parsed(&function.return_type)?;
 
-    let params = function
+    let params: Vec<_> = function
         .params
         .iter()
         .map(|param| {
             Ok(CheckedFunctionParameter {
-                name: param.name,
+                name: param.name.clone(),
                 type_id: program.defined_types.check_parsed(&param.parsed_type)?,
             })
         })
         .collect::<Result<_, _>>()?;
 
-    let expression =
-        eval_lhs_and_check!(program, function.expression, return_type, FunctionReturn)?;
+    let bindings = params
+        .iter()
+        .map(|CheckedFunctionParameter { name, type_id }| Binding {
+            name: name.clone(),
+            type_id: *type_id,
+        })
+        .collect();
+
+    let function_scope = scope.inner_with_bindings(bindings);
+
+    let expression = eval_lhs_and_check!(
+        program,
+        &function_scope,
+        function.expression,
+        return_type,
+        FunctionReturn
+    )?;
 
     Ok(CheckedFunction {
         name: function.name,
@@ -643,12 +784,13 @@ fn typecheck_function(
 
 fn typecheck_procedure(
     program: &CheckedProgram,
+    scope: &Scope,
     procedure: Procedure,
 ) -> TypeCheckResult<CheckedProcedure> {
     let body = procedure
         .body
         .into_iter()
-        .map(|p| typecheck_statement(program, p))
+        .map(|p| typecheck_statement(program, scope, p))
         .collect::<Result<_, _>>()?;
 
     Ok(CheckedProcedure {
@@ -659,10 +801,12 @@ fn typecheck_procedure(
 
 fn typecheck_assertion(
     program: &CheckedProgram,
+    scope: &Scope,
     assertion: Assertion,
 ) -> TypeCheckResult<CheckedAssertion> {
     let predicate = eval_lhs_and_check!(
         program,
+        scope,
         assertion.predicate,
         program
             .defined_types
@@ -679,16 +823,18 @@ fn typecheck_assertion(
 
 pub fn typecheck_statement(
     program: &CheckedProgram,
+    scope: &Scope,
     statement: Statement,
 ) -> TypeCheckResult<CheckedStatement> {
     Ok(match statement {
         Statement::AssertionCall { name } => {
             // TODO: Do I need to check the called assertion here? I don't think so,
             // since I check every top-level thing anyway
-            program
-                .assertions
-                .get(&name)
-                .ok_or_else(|| UndefinedAssertion { name })?;
+            program.assertions.get(&name).ok_or_else(|| {
+                wrap!(UndefinedAssertion {
+                    name: name.to_string(),
+                })
+            })?;
 
             CheckedStatement::AssertionCall { name }
         }
@@ -698,7 +844,7 @@ pub fn typecheck_statement(
             program
                 .procedures
                 .get(&name)
-                .ok_or_else(|| UndefinedProcedure { name })?;
+                .ok_or_else(|| wrap!(UndefinedProcedure { name: name.clone() }))?;
 
             CheckedStatement::ProcedureCall { name }
         }
@@ -707,9 +853,9 @@ pub fn typecheck_statement(
             assign_op,
             rhs,
         } => {
-            let lhs = typecheck_access_expression(program, lhs)?;
+            let lhs = typecheck_access_expression(program, scope, lhs)?;
 
-            let rhs = eval_lhs_and_check!(program, rhs, lhs.type_id(), AssignmentMissmatch)?;
+            let rhs = eval_lhs_and_check!(program, scope, rhs, lhs.type_id(), AssignmentMissmatch)?;
 
             // Just here so the compile fails if I add more assing ops that might change the type.
             match assign_op {
@@ -724,24 +870,26 @@ pub fn typecheck_statement(
             }
         }
         Statement::Expression(expression) => {
-            CheckedStatement::Expression(typecheck_expression(program, expression)?)
+            CheckedStatement::Expression(typecheck_expression(program, scope, expression)?)
         }
     })
 }
 
 pub fn typecheck_expression(
     program: &CheckedProgram,
+    scope: &Scope,
     expression: Expression,
 ) -> TypeCheckResult<CheckedExpression> {
     Ok(match expression {
         Expression::Access(access) => {
-            CheckedExpression::Access(typecheck_access_expression(program, access)?)
+            CheckedExpression::Access(typecheck_access_expression(program, scope, access)?)
         }
         Expression::Binary { lhs, op, rhs } => {
-            let lhs = typecheck_access_expression(program, lhs)?;
+            let lhs = typecheck_access_expression(program, scope, lhs)?;
 
             let rhs = Box::new(eval_lhs_and_check!(
                 program,
+                scope,
                 *rhs,
                 lhs.type_id(),
                 BinaryExpressionMissmatch
@@ -783,8 +931,10 @@ fn check_binary_op(
         .get_id(expected_type)
         .expect("Explicitly requested type name is undefined");
 
-    if lhs_type != expected_type_id || rhs_type != expected_type_id {
-        Err(BinaryOpType {
+    if !lhs_type.is_compatible_with(expected_type_id)
+        || !rhs_type.is_compatible_with(expected_type_id)
+    {
+        err!(BinaryOpType {
             lhs_type: type_name(program, lhs_type),
             rhs_type: type_name(program, lhs_type),
             op,
@@ -797,9 +947,10 @@ fn check_binary_op(
 
 pub fn typecheck_access_expression(
     program: &CheckedProgram,
+    scope: &Scope,
     access: AccessExpression,
 ) -> TypeCheckResult<CheckedAccessExpression> {
-    let lhs = typecheck_simple_expression(program, access.lhs)?;
+    let lhs = typecheck_simple_expression(program, scope, access.lhs)?;
 
     let mut type_id = lhs.type_id();
 
@@ -810,6 +961,7 @@ pub fn typecheck_access_expression(
             Indirection::Subscript { index_expr } => {
                 let index_expr = eval_lhs_and_check!(
                     program,
+                    scope,
                     index_expr,
                     program.defined_types.get_id("u64").expect("u64 undefined"),
                     ArraySubscript
@@ -838,6 +990,7 @@ pub fn typecheck_access_expression(
 
 pub fn typecheck_simple_expression(
     program: &CheckedProgram,
+    scope: &Scope,
     simple: SimpleExpression,
 ) -> TypeCheckResult<CheckedSimpleExpression> {
     Ok(match simple {
@@ -846,14 +999,16 @@ pub fn typecheck_simple_expression(
         SimpleExpression::String(value) => CheckedSimpleExpression::String(value),
         SimpleExpression::ArrayLiteral(array) => {
             let arr_type = if let Some(first) = array.first() {
-                typecheck_expression(program, first.clone())?.type_id()
+                typecheck_expression(program, scope, first.clone())?.type_id()
             } else {
-                TypeId::unknown()
+                // TODO: Is just ignoring type-check on an empty array just always fine? I don't
+                // think so.
+                TypeId::unchecked()
             };
 
             let elements = array
                 .into_iter()
-                .map(|expr| eval_lhs_and_check!(program, expr, arr_type, ArrayMissmatch))
+                .map(|expr| eval_lhs_and_check!(program, scope, expr, arr_type, ArrayMissmatch))
                 .collect::<Result<_, _>>()?;
 
             CheckedSimpleExpression::ArrayLiteral {
@@ -865,10 +1020,10 @@ pub fn typecheck_simple_expression(
             let function = program
                 .functions
                 .get(&name)
-                .ok_or_else(|| UndefinedFunction { name })?;
+                .ok_or_else(|| wrap!(UndefinedFunction { name }))?;
 
             if arguments.len() != function.params.len() {
-                return Err(FunctionArgumentCount {
+                return err!(FunctionArgumentCount {
                     func_name: function.name.to_string(),
                     arg_count: arguments.len(),
                     param_count: function.params.len(),
@@ -882,33 +1037,62 @@ pub fn typecheck_simple_expression(
                 .map(|(param, arg)| {
                     eval_lhs_and_check!(
                         program,
+                        scope,
                         arg,
                         param,
                         ParamArgMissmatch,
-                        [("function", function.name)]
+                        [("function", &function.name)]
                     )
                 })
                 .collect::<Result<_, _>>()?;
 
             CheckedSimpleExpression::FunctionCall {
-                name: function.name,
+                name: function.name.clone(),
                 arguments,
                 type_id: function.return_type,
             }
         }
-        SimpleExpression::StructLiteral(structure) => todo!("I'm not sure if I want to allow {{a: 2}} or {{a: int = 2}} literals without a type name, or just c-style literals."),
-        SimpleExpression::Parentheses { inner } => CheckedSimpleExpression::Parentheses{ inner: Box::new(typecheck_expression(program, *inner)?)},
+        SimpleExpression::StructLiteral { name, fields } => {
+            if name.is_none() && fields.is_empty() {
+                CheckedSimpleExpression::StructLiteral {
+                    type_name: None,
+                    fields: Vec::new(),
+                    type_id: TypeId::unchecked(),
+                }
+            } else {
+                todo!("I'm not sure if I want to allow {{a: 2}} or {{a: int = 2}} literals without a type name, or just c-style literals.")
+            }
+        }
+        SimpleExpression::Parentheses { inner } => CheckedSimpleExpression::Parentheses {
+            inner: Box::new(typecheck_expression(program, scope, *inner)?),
+        },
         SimpleExpression::StateAccess { name } => {
-            let type_id = program.structs.get("state").expect("Parser should ensure state struct is defined.").type_of_field(&name)?;
+            let type_id = program
+                .structs
+                .get("state")
+                .expect("Parser should ensure state struct is defined.")
+                .type_of_field(&name)?;
 
             CheckedSimpleExpression::StateAccess { name, type_id }
         }
         SimpleExpression::ExecutionAccess {
             execution,
             access_expression,
-        } => {
-            CheckedSimpleExpression::ExecutionAccess{ execution, access_expression: Box::new(typecheck_access_expression(program, *access_expression)?) }
+        } => CheckedSimpleExpression::ExecutionAccess {
+            execution,
+            access_expression: Box::new(typecheck_access_expression(
+                program,
+                scope,
+                *access_expression,
+            )?),
+        },
+        SimpleExpression::BindingAccess { name } => {
+            let Binding { type_id, .. } = scope.find_binding(&name)?;
+
+            CheckedSimpleExpression::BindingAccess {
+                name,
+                type_id: *type_id,
+            }
         }
-        SimpleExpression::BindingAccess { name } => todo!("Needs scope at compile-time"),
     })
 }

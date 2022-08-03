@@ -3,10 +3,11 @@
 
 use std::process::exit;
 
-use crate::{meta_interpreter::MetaInterpreter, parser::Parser};
-mod interpreter;
+// use crate::{meta_interpreter::MetaInterpreter, parser::Parser};
+use crate::{parser::Parser, typechecker::typecheck_program};
+// mod interpreter;
 mod lexer;
-mod meta_interpreter;
+// mod meta_interpreter;
 mod parser;
 mod typechecker;
 mod util;
@@ -21,10 +22,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let parser = Parser::new(tokens);
 
     let (state, program) = parser.parse().unwrap_or_else(|err| {
-        println!("{:#?}", err);
+        println!("{}\n{}", err, err.backtrace);
 
         exit(1);
     });
+
+    let checked_program = typecheck_program(program);
+
+    if let Err(err) = checked_program {
+        println!("{err}\n{}", err.backtrace);
+    } else {
+        println!("SUCCESS!!");
+    }
+
+    /*
 
     println!("{:#?}", program);
 
@@ -40,6 +51,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
+    */
 
     Ok(())
 

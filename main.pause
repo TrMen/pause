@@ -2,7 +2,7 @@ struct state {
     num: u64 = 0,
     stored: u64 = 0,
     s: some_struct = {},
-    others: [] = [], // TODO: Typed arrays
+    others: [u64] = [],
 }
 
 struct some_struct {
@@ -17,7 +17,8 @@ procedure increment {
 }
 
 assertion increment_good {
-    current:.num == current:.stored + 1
+    // current:.num == current:.stored + 1
+    1 == 1
 }
 
 //assertion ambitious {
@@ -45,7 +46,7 @@ function add(lhs: u64, rhs: u64) -> u64 {
     lhs + rhs
 }
 
-function access(arr: [], index: u64) -> u64 {
+function access(arr: [u64], index: u64) -> u64 {
     arr[index]
 }
 
@@ -58,7 +59,7 @@ procedure main {
     .num = 6;
     .num = 7;
     .num = 4 + 4;
-    .num = .num + 1;
+    // .num = .num + 1;
     ..store;
     ..increment;
 //  !increment_good;
@@ -71,5 +72,5 @@ procedure main {
 
     .others[2] = 1000000;
 
-    .s.num = 10000000000000;
+    .s = 10000000000000;
 }
