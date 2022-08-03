@@ -417,7 +417,6 @@ impl Parser {
     pub fn parse(mut self) -> ParseResult<(Struct, Program)> {
         while !self.at_end() {
             self.top_level_decl()?;
-            println!("{self:?}\n\n\n\n\n");
         }
 
         if self.main.is_none() {
@@ -730,9 +729,6 @@ impl Parser {
             }
             TokenKind::ExecutionDesignator(execution) => {
                 self.expect(TokenKind::Colon)?;
-
-                // Must be state access expression after execution designation
-                self.expect(TokenKind::Dot)?;
 
                 let access_expression = Box::new(self.access_expression()?);
 

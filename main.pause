@@ -17,14 +17,13 @@ procedure increment {
 }
 
 assertion increment_good {
-    // current:.num == current:.stored + 1
-    1 == 1
+    current:.num == current:.stored + 1
 }
 
-//assertion ambitious {
-//    current:.s.num + 1 == past:.s.num + 1 + 1
-//}
-//
+assertion ambitious {
+    (current:.s.num + 1) == (past:.s.num + 1 + 1)
+}
+
 //procedure fallible {
 //    error "Unlucky"
 //}
@@ -46,8 +45,8 @@ function add(lhs: u64, rhs: u64) -> u64 {
     lhs + rhs
 }
 
-function access(arr: [u64], index: u64) -> u64 {
-    arr[index]
+function access(arr: [[u64]], index: u64) -> u64 {
+    arr[index][2]
 }
 
 procedure main {
@@ -59,18 +58,20 @@ procedure main {
     .num = 6;
     .num = 7;
     .num = 4 + 4;
-    // .num = .num + 1;
+    .num = .num + 1;
     ..store;
     ..increment;
-//  !increment_good;
+    !increment_good;
     .num = plus_one(plus_one(8));
     .stored = add(14, 100);
 
     .others = [2,3,4];
 
-    .stored = access([1,2,9001,3], 2);
+    .stored = access([[1,2,9001,3]], 2);
 
     .others[2] = 1000000;
 
-    .s = 10000000000000;
+    .others = [];
+
+    .s.num = 2;
 }

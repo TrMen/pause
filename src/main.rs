@@ -1,5 +1,7 @@
 #![feature(never_type)]
 #![feature(backtrace)]
+#![feature(variant_count)]
+#![feature(let_chains)]
 
 use std::process::exit;
 
@@ -17,12 +19,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tokens = lexer::Lexer::lex(file_content.as_bytes());
 
-    println!("{tokens:#?}");
-
     let parser = Parser::new(tokens);
 
     let (state, program) = parser.parse().unwrap_or_else(|err| {
-        println!("{}\n{}", err, err.backtrace);
+        println!("{}\n{err}", err.backtrace);
 
         exit(1);
     });
@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let checked_program = typecheck_program(program);
 
     if let Err(err) = checked_program {
-        println!("{err}\n{}", err.backtrace);
+        println!("{}\n{err}", err.backtrace);
     } else {
         println!("SUCCESS!!");
     }

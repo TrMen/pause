@@ -4,8 +4,6 @@ use std::{
     hash::Hash,
 };
 
-use std::backtrace::Backtrace;
-
 use thiserror::Error;
 
 use crate::{
@@ -20,7 +18,7 @@ macro_rules! err {
     ($error:expr) => {
         Err(TypeCheckErrorWrapper {
             error: $error,
-            backtrace: Backtrace::force_capture(),
+            backtrace: std::backtrace::Backtrace::force_capture(),
         })
     };
 }
@@ -29,44 +27,39 @@ macro_rules! wrap {
     ($error:expr) => {
         TypeCheckErrorWrapper {
             error: $error,
-            backtrace: Backtrace::force_capture(),
+            backtrace: std::backtrace::Backtrace::force_capture(),
         }
     };
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TypeId {
     id: usize,
 }
 
 impl TypeId {
-    fn is_compatible_with(&self, other: TypeId) -> bool {
-        if self.id == TypeId::unchecked().id || other.id == TypeId::unchecked().id {
-            true
-        } else {
-            self.id == other.id
-        }
-    }
-
-    fn builtin(name: &str) -> Self {
-        Self {
-            id: BUILTIN_TYPES
-                .iter()
-                .position(|builtin| builtin == &name)
-                .unwrap(),
-        }
+    fn is_exactly(&self, other: TypeId) -> bool {
+        self.id == other.id
     }
 
     fn unknown() -> Self {
         Self { id: usize::MAX }
     }
 
-    fn unchecked() -> Self {
-        Self { id: usize::MAX - 1 }
+    fn is_builtin(&self) -> bool {
+        self.id < std::mem::variant_count::<BuiltinType>()
     }
 
-    fn is_builtin(&self) -> bool {
-        self.id < BUILTIN_TYPES.len()
+    fn builtin(name: &str) -> TypeId {
+        let id = match name {
+            "void" => BuiltinType::Void,
+            "bool" => BuiltinType::Bool,
+            "u64" => BuiltinType::U64,
+            "string" => BuiltinType::String,
+            _ => panic!("Trying to get non-builtin type '{name}'"),
+        };
+
+        TypeId { id: id as usize }
     }
 }
 
@@ -232,71 +225,270 @@ impl Typed for CheckedAccessExpression {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct DefinedTypes {
-    types: HashMap<String, TypeId>,
-    next_id: usize,
+#[derive(Debug, Clone, PartialEq)]
+#[repr(u8)]
+pub enum BuiltinType {
+    Void,
+    Bool,
+    U64,
+    String,
 }
 
-const BUILTIN_TYPES: [&str; 4] = ["void", "bool", "u64", "string"];
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeDescription {
+    Builtin(BuiltinType),
+    Unknown,
+    Struct(TypeId),
+    GenericInstance {
+        generic_id: GenericId,
+        type_arguments: Vec<TypeId>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Type {
+    description: TypeDescription,
+    type_id: TypeId,
+}
+
+impl Typed for Type {
+    fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum TypeParameterCount {
+    Fixed(usize),
+    Variadic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GenericId {
+    id: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct GenericType {
+    name: String,
+    generic_id: GenericId,
+    parameter_count: TypeParameterCount,
+}
+
+#[derive(Debug, Clone)]
+pub struct DefinedTypes {
+    // Includes builtins, all generic type instances used in the program,
+    // and structs. Structs are also kept in the struct field for lookup by name.
+    concrete_types: Vec<Type>,
+
+    structs: HashMap<String, TypeId>,
+    // Includes all generic types like array that can't be directly instanciated.
+    generic_types: Vec<GenericType>,
+    next_id: usize,
+    next_generic_id: usize,
+}
 
 impl DefinedTypes {
     pub fn from_builtin() -> Self {
-        let mut next_id = 0;
+        use BuiltinType::*;
 
-        let builtin_types = BUILTIN_TYPES
+        let builtin_types = vec![Void, Bool, U64, String];
+
+        let mut this = Self {
+            structs: HashMap::new(),
+            generic_types: Vec::new(),
+            next_id: builtin_types.len(),
+            concrete_types: builtin_types
+                .into_iter()
+                .enumerate()
+                .map(|(id, builtin)| Type {
+                    type_id: TypeId { id },
+                    description: TypeDescription::Builtin(builtin),
+                })
+                .collect(),
+            next_generic_id: 0,
+        };
+
+        this.define_generic("array".to_string(), TypeParameterCount::Fixed(1));
+
+        this.define_struct("<empty_struct>".to_string()).unwrap();
+
+        this
+    }
+
+    fn define_generic(
+        &mut self,
+        name: String,
+        parameter_count: TypeParameterCount,
+    ) -> &GenericType {
+        self.generic_types.push(GenericType {
+            name,
+            generic_id: GenericId {
+                id: self.next_generic_id,
+            },
+            parameter_count,
+        });
+
+        self.next_generic_id += 1;
+
+        self.generic_types.last().unwrap()
+    }
+
+    fn get_generic(&self, name: &str) -> TypeCheckResult<GenericId> {
+        self.generic_types
             .iter()
-            .map(|p| {
-                next_id += 1;
-                (p.to_string(), TypeId { id: next_id - 1 })
+            .find(|g| g.name == name)
+            .map(|g| g.generic_id)
+            .ok_or_else(|| {
+                wrap!(UndefinedGenericType {
+                    name: name.to_string()
+                })
             })
-            .collect();
-
-        Self {
-            types: builtin_types,
-            next_id,
-        }
     }
 
-    pub fn define_type(&mut self, name: String) -> TypeId {
-        let id = TypeId { id: self.next_id };
+    fn are_assignment_compatible(&self, lhs: TypeId, rhs: TypeId) -> bool {
+        if let TypeDescription::Struct(_) = self.get_type_description(lhs)
+            && rhs == self.get_struct("<empty_struct>").unwrap() {
+            true
+        }
+        else if let TypeDescription::GenericInstance {generic_id: generic_id_lhs, ..} = self.get_type_description(lhs)
+            && let TypeDescription::GenericInstance { generic_id: generic_id_rhs, type_arguments: type_arguments_rhs } = self.get_type_description(rhs)
+            && generic_id_lhs == self.get_generic("array").unwrap()
+            && generic_id_rhs == self.get_generic("array").unwrap()
+            && *type_arguments_rhs.first().unwrap() == TypeId::unknown(){
+                // rhs is an empty array literal, and lhs is any array type
+                true
+            }
+        else {lhs.is_exactly(rhs)}
+    }
+
+    pub fn define_struct(&mut self, name: String) -> TypeCheckResult<TypeId> {
+        if self.structs.contains_key(&name) {
+            return err!(StructRedefinition { name });
+        }
+
+        let type_id = TypeId { id: self.next_id };
         self.next_id += 1;
-        self.types.insert(name, id);
-        id
+
+        self.concrete_types.push(Type {
+            type_id,
+            description: TypeDescription::Struct(type_id),
+        });
+
+        self.structs.insert(name, type_id);
+
+        Ok(type_id)
     }
 
-    pub fn get_typename(&self, id: TypeId) -> &str {
-        if id.is_compatible_with(TypeId::unknown()) {
-            return "<unknown>";
+    fn get_type_description(&self, id: TypeId) -> TypeDescription {
+        if id == TypeId::unknown() {
+            TypeDescription::Unknown
+        } else {
+            // Because we insert them in order and give out the type id we just inserted
+            self.concrete_types[id.id].description.clone()
         }
-
-        // I only give out type ids from this struct, so a name must exist
-        self.types
-            .iter()
-            .find(|p| p.1.is_compatible_with(id))
-            .map(|p| p.0)
-            .unwrap()
     }
 
-    pub fn get_id(&self, name: &str) -> TypeCheckResult<TypeId> {
-        self.types
+    pub fn type_name(&self, id: TypeId) -> String {
+        let description = self.get_type_description(id);
+
+        match description {
+            TypeDescription::Builtin(builtin) => match builtin {
+                BuiltinType::Void => "void".to_string(),
+                BuiltinType::Bool => "bool".to_string(),
+                BuiltinType::U64 => "u64".to_string(),
+                BuiltinType::String => "string".to_string(),
+            },
+            TypeDescription::Unknown => "<unknown>".to_string(),
+            TypeDescription::Struct(type_id) => self
+                .structs
+                .iter()
+                .find(|p| p.1.is_exactly(type_id))
+                .map(|p| p.0.to_string())
+                .unwrap_or_else(|| {
+                    panic!("Asked for struct by undefined type id '{:#?}'", type_id)
+                }),
+            TypeDescription::GenericInstance {
+                generic_id,
+                type_arguments,
+            } => {
+                let generic_type = self
+                    .generic_types
+                    .iter()
+                    .find(|g| g.generic_id == generic_id)
+                    .unwrap();
+
+                if generic_type.name == "array" {
+                    assert_eq!(type_arguments.len(), 1);
+
+                    format!("[{}]", self.type_name(type_arguments[0]))
+                } else {
+                    todo!("Non-array generics");
+                }
+            }
+        }
+    }
+
+    fn get_struct(&self, name: &str) -> TypeCheckResult<TypeId> {
+        self.structs
             .get(name)
             .ok_or_else(|| {
                 wrap!(UndefinedType {
-                    name: name.to_string(),
+                    name: name.to_string()
                 })
             })
             .copied()
     }
 
-    fn check_parsed(&self, parsed_type: &ParsedType) -> TypeCheckResult<TypeId> {
-        match &parsed_type {
+    fn typecheck_parsed_type(&mut self, parsed_type: &ParsedType) -> TypeCheckResult<TypeId> {
+        Ok(match &parsed_type {
             // Unwrap: ParsedTypes occur in the source code, so they must be build-in or
             // user-d&efined
-            ParsedType::Simple { name } => self.get_id(name),
-            ParsedType::Array { inner } => self.check_parsed(inner),
-            ParsedType::Void => Ok(self.types["void"]),
-            ParsedType::Unknown => Ok(TypeId::unknown()),
+            ParsedType::Simple { name } => match name.as_str() {
+                name @ ("u64" | "string" | "bool") => TypeId::builtin(name),
+                _ => self.get_struct(name)?,
+            },
+            ParsedType::Array { inner } => {
+                let inner_id = self.typecheck_parsed_type(inner)?;
+
+                let array_type_id = self
+                    .generic_types
+                    .iter()
+                    .find(|generic| generic.name == "array")
+                    .expect("array type undefined")
+                    .generic_id;
+
+                self.get_or_define_type(TypeDescription::GenericInstance {
+                    generic_id: array_type_id,
+                    type_arguments: vec![inner_id],
+                })
+            }
+
+            ParsedType::Void => TypeId::builtin("void"),
+            ParsedType::Unknown => TypeId::unknown(),
+        })
+    }
+
+    fn get_or_define_type(&mut self, description: TypeDescription) -> TypeId {
+        if let Some(existing) = self
+            .concrete_types
+            .iter()
+            .enumerate()
+            .find(|(_, typ)| typ.description == description)
+        {
+            TypeId { id: existing.0 }
+        } else {
+            self.next_id += 1;
+            let type_id = TypeId {
+                id: self.next_id - 1,
+            };
+
+            self.concrete_types.push(Type {
+                type_id,
+                description,
+            });
+
+            type_id
         }
     }
 }
@@ -395,7 +587,6 @@ pub struct CheckedProgram {
     pub assertions: HashMap<String, CheckedAssertion>,
     pub procedures: HashMap<String, CheckedProcedure>,
     pub main: CheckedProcedure,
-    pub defined_types: DefinedTypes,
 }
 
 impl CheckedProgram {
@@ -405,39 +596,28 @@ impl CheckedProgram {
         assertions: HashMap<String, CheckedAssertion>,
         procedures: HashMap<String, CheckedProcedure>,
         main: CheckedProcedure,
-        defined_types: DefinedTypes,
     ) -> Self {
-        let mut program = Self {
+        Self {
             procedures,
             assertions,
             functions,
             structs,
             main,
-            defined_types,
-        };
-
-        for structure in &program.structs {
-            program.defined_types.define_type(structure.0.clone());
         }
-
-        program
     }
+}
 
-    pub fn get_struct_for_type(&self, id: TypeId) -> TypeCheckResult<&CheckedStruct> {
-        let type_name = self.defined_types.get_typename(id);
+pub fn get_struct_for_type<'a>(
+    program: &'a CheckedProgram,
+    types: &DefinedTypes,
+    id: TypeId,
+) -> TypeCheckResult<&'a CheckedStruct> {
+    let type_name = types.type_name(id);
 
-        if id.is_builtin() {
-            return err!(BuiltinStructUse {
-                type_name: type_name.to_string(),
-            });
-        }
-
-        self.structs.get(type_name).ok_or_else(|| {
-            wrap!(UndefinedType {
-                name: type_name.to_string(),
-            })
-        })
-    }
+    Ok(program
+        .structs
+        .get(&type_name)
+        .expect("Struct is not defined in program despite being found in defined types"))
 }
 
 #[derive(Error, Debug)]
@@ -466,6 +646,8 @@ pub enum TypeCheckError {
     UndefinedProcedure { name: String },
     #[error("Undefined type '{name}'")]
     UndefinedType { name: String },
+    #[error("Undefined generic type '{name}'")]
+    UndefinedGenericType { name: String },
     #[error("Trying to use types '{lhs_type}' and '{rhs_type}' in binary operation '{op:#?}'. Types must be '{expected_type}'.")]
     BinaryOpType {
         lhs_type: String,
@@ -473,9 +655,7 @@ pub enum TypeCheckError {
         op: BinaryOp,
         expected_type: String,
     },
-    #[error("Trying to use builtin type '{type_name}' as if it were a struct.")]
-    BuiltinStructUse { type_name: String },
-    #[error("Struct '{struct_name}' has no field '{field_name}'")]
+    #[error("Type '{struct_name}' has no field '{field_name}'")]
     UndefinedStructField {
         struct_name: String,
         field_name: String,
@@ -488,8 +668,17 @@ pub enum TypeCheckError {
         arg_count: usize,
         param_count: usize,
     },
-    #[error("Incorrect argument for call to function '{}'. Expression '{:#?}' evaluates to '{}'. Expected '{}'", .common.context["function"], .common.expr, .common.actual, .common.expected)]
+    #[error("Incorrect argument type for call to function '{}'. Expression '{:#?}' evaluates to '{}'. Expected '{}'", .common.context["function"], .common.expr, .common.actual, .common.expected)]
     ParamArgMissmatch { common: TypeCheckErrorCommon },
+    #[error("Struct '{name}' is already defined.")]
+    StructRedefinition { name: String },
+    #[error(
+        "Trying index into expression '{expr:#?}' of type '{expr_type}' as if it were an array."
+    )]
+    NonArraySubscript {
+        expr: AccessExpression,
+        expr_type: String,
+    },
 }
 
 use TypeCheckError::*;
@@ -538,54 +727,50 @@ where
     Ok(())
 }
 
-macro_rules! eval_lhs_and_check {
-    ($program:expr, $scope:expr ,$lhs:expr, $rhs:expr, $error:ident) => {{
-        let lhs_checked = typecheck_expression($program, $scope, $lhs)?;
+macro_rules! eval_rhs_and_check {
+    ($program:expr, $types:expr, $scope:expr ,$assignee:expr, $rhs:expr, $error:ident) => {{
+        let rhs_checked = typecheck_expression($program, $types, $scope, $rhs)?;
 
-        if !lhs_checked.type_id().is_compatible_with($rhs.type_id()) {
+        if !$types.are_assignment_compatible($assignee.type_id(), rhs_checked.type_id()) {
             err!(TypeCheckError::$error {
                 common: TypeCheckErrorCommon {
-                    actual: type_name($program, lhs_checked.type_id()),
-                    expr: lhs_checked,
-                    expected: type_name($program, $rhs.type_id()),
+                    actual: $types.type_name(rhs_checked.type_id()),
+                    expr: rhs_checked,
+                    expected: $types.type_name($assignee.type_id()),
                     context: HashMap::new(),
                 },
             })
         } else {
-            Ok(lhs_checked)
+            Ok(rhs_checked)
         }
     }};
 
-    ($program:expr, $scope:expr, $lhs:expr, $rhs:expr, $error:ident, $context:expr) => {{
+    ($program:expr, $types:expr, $scope:expr, $assignee:expr, $rhs:expr, $error:ident, $context:expr) => {{
         let context = $context
             .into_iter()
             .map(|p| (p.0.to_string(), p.1.to_string()))
             .collect();
 
-        let lhs_checked = typecheck_expression($program, $scope, $lhs)?;
+        let rhs_checked = typecheck_expression($program, $types, $scope, $rhs)?;
 
-        if !lhs_checked.type_id().is_compatible_with($rhs.type_id()) {
+        if !$types.are_assignment_compatible($assignee.type_id(), rhs_checked.type_id()) {
             err!(TypeCheckError::$error {
                 common: TypeCheckErrorCommon {
-                    actual: type_name($program, lhs_checked.type_id()),
-                    expr: lhs_checked,
-                    expected: type_name($program, $rhs.type_id()),
+                    actual: $types.type_name(rhs_checked.type_id()),
+                    expr: rhs_checked,
+                    expected: $types.type_name($assignee.type_id()),
                     context,
                 },
             })
         } else {
-            Ok(lhs_checked)
+            Ok(rhs_checked)
         }
     }};
 }
 
-pub fn type_name(program: &CheckedProgram, type_id: TypeId) -> String {
-    program.defined_types.get_typename(type_id).to_string()
-}
-
 pub fn typecheck_program(program: Program) -> TypeCheckResult<CheckedProgram> {
     // Predecl all structs so they can be used in function definitions
-    let predecl_structs = program
+    let predecl_structs: HashMap<_, _> = program
         .structs
         .iter()
         .map(|s| {
@@ -620,6 +805,12 @@ pub fn typecheck_program(program: Program) -> TypeCheckResult<CheckedProgram> {
         })
         .collect();
 
+    let mut types = DefinedTypes::from_builtin();
+
+    for name in predecl_structs.keys() {
+        types.define_struct(name.clone())?;
+    }
+
     let mut checked_program = CheckedProgram::new(
         predecl_structs,
         predecl_functions,
@@ -629,7 +820,6 @@ pub fn typecheck_program(program: Program) -> TypeCheckResult<CheckedProgram> {
             name: "main".to_string(),
             body: Vec::new(),
         },
-        DefinedTypes::from_builtin(),
     );
 
     // Then typecheck functions, since they can only use structs and buildin types, or other
@@ -640,7 +830,7 @@ pub fn typecheck_program(program: Program) -> TypeCheckResult<CheckedProgram> {
         .map(|f| {
             Ok((
                 f.0.clone(),
-                typecheck_function(&checked_program, &GLOBAL_SCOPE, f.1)?,
+                typecheck_function(&checked_program, &mut types, &GLOBAL_SCOPE, f.1)?,
             ))
         })
         .collect::<Result<HashMap<_, _>, _>>()?;
@@ -653,7 +843,7 @@ pub fn typecheck_program(program: Program) -> TypeCheckResult<CheckedProgram> {
         .map(|s| {
             Ok((
                 s.0.clone(),
-                typecheck_struct(&checked_program, &GLOBAL_SCOPE, s.1)?,
+                typecheck_struct(&checked_program, &mut types, &GLOBAL_SCOPE, s.1)?,
             ))
         })
         .collect::<Result<HashMap<_, _>, _>>()?;
@@ -665,7 +855,7 @@ pub fn typecheck_program(program: Program) -> TypeCheckResult<CheckedProgram> {
         .map(|a| {
             Ok((
                 a.0.clone(),
-                typecheck_assertion(&checked_program, &GLOBAL_SCOPE, a.1)?,
+                typecheck_assertion(&checked_program, &mut types, &GLOBAL_SCOPE, a.1)?,
             ))
         })
         .collect::<Result<HashMap<_, _>, _>>()?;
@@ -692,19 +882,21 @@ pub fn typecheck_program(program: Program) -> TypeCheckResult<CheckedProgram> {
         .map(|p| {
             Ok((
                 p.0.clone(),
-                typecheck_procedure(&checked_program, &GLOBAL_SCOPE, p.1)?,
+                typecheck_procedure(&checked_program, &mut types, &GLOBAL_SCOPE, p.1)?,
             ))
         })
         .collect::<Result<HashMap<_, _>, _>>()?;
 
     // And finally main (is just a procedure, but may be different in the future)
-    checked_program.main = typecheck_procedure(&checked_program, &GLOBAL_SCOPE, program.main)?;
+    checked_program.main =
+        typecheck_procedure(&checked_program, &mut types, &GLOBAL_SCOPE, program.main)?;
 
     Ok(checked_program)
 }
 
 fn typecheck_struct(
     program: &CheckedProgram,
+    types: &mut DefinedTypes,
     scope: &Scope,
     structure: Struct,
 ) -> TypeCheckResult<CheckedStruct> {
@@ -714,17 +906,23 @@ fn typecheck_struct(
         .fields
         .into_iter()
         .map(|field| {
-            let initializer = eval_lhs_and_check!(
-                program,
-                scope,
-                field.initializer,
-                program.defined_types.check_parsed(&field.parsed_type)?,
-                FieldInitializerMissmatch
-            )?;
+            let field_type = types.typecheck_parsed_type(&field.parsed_type)?;
+            let initializer = typecheck_expression(program, types, scope, field.initializer)?;
+
+            if !types.are_assignment_compatible(field_type.type_id(), initializer.type_id()) {
+                return err!(FieldInitializerMissmatch {
+                    common: TypeCheckErrorCommon {
+                        actual: types.type_name(initializer.type_id()),
+                        expr: initializer,
+                        expected: types.type_name(field_type.type_id()),
+                        context: HashMap::new(),
+                    },
+                });
+            }
 
             Ok(CheckedStructField {
                 name: field.name,
-                type_id: initializer.type_id(),
+                type_id: field_type,
                 initializer,
             })
         })
@@ -738,12 +936,13 @@ fn typecheck_struct(
 
 fn typecheck_function(
     program: &CheckedProgram,
+    types: &mut DefinedTypes,
     scope: &Scope,
     function: Function,
 ) -> TypeCheckResult<CheckedFunction> {
     check_unique(function.params.iter().map(|param| &param.name))?;
 
-    let return_type = program.defined_types.check_parsed(&function.return_type)?;
+    let return_type = types.typecheck_parsed_type(&function.return_type)?;
 
     let params: Vec<_> = function
         .params
@@ -751,7 +950,7 @@ fn typecheck_function(
         .map(|param| {
             Ok(CheckedFunctionParameter {
                 name: param.name.clone(),
-                type_id: program.defined_types.check_parsed(&param.parsed_type)?,
+                type_id: types.typecheck_parsed_type(&param.parsed_type)?,
             })
         })
         .collect::<Result<_, _>>()?;
@@ -766,11 +965,12 @@ fn typecheck_function(
 
     let function_scope = scope.inner_with_bindings(bindings);
 
-    let expression = eval_lhs_and_check!(
+    let expression = eval_rhs_and_check!(
         program,
+        types,
         &function_scope,
-        function.expression,
         return_type,
+        function.expression,
         FunctionReturn
     )?;
 
@@ -784,13 +984,14 @@ fn typecheck_function(
 
 fn typecheck_procedure(
     program: &CheckedProgram,
+    types: &mut DefinedTypes,
     scope: &Scope,
     procedure: Procedure,
 ) -> TypeCheckResult<CheckedProcedure> {
     let body = procedure
         .body
         .into_iter()
-        .map(|p| typecheck_statement(program, scope, p))
+        .map(|p| typecheck_statement(program, types, scope, p))
         .collect::<Result<_, _>>()?;
 
     Ok(CheckedProcedure {
@@ -801,17 +1002,16 @@ fn typecheck_procedure(
 
 fn typecheck_assertion(
     program: &CheckedProgram,
+    types: &mut DefinedTypes,
     scope: &Scope,
     assertion: Assertion,
 ) -> TypeCheckResult<CheckedAssertion> {
-    let predicate = eval_lhs_and_check!(
+    let predicate = eval_rhs_and_check!(
         program,
+        types,
         scope,
+        TypeId::builtin("bool"),
         assertion.predicate,
-        program
-            .defined_types
-            .get_id("bool")
-            .expect("Builtin type bool not defined"),
         AssertionExpressionType
     )?;
 
@@ -823,6 +1023,7 @@ fn typecheck_assertion(
 
 pub fn typecheck_statement(
     program: &CheckedProgram,
+    types: &mut DefinedTypes,
     scope: &Scope,
     statement: Statement,
 ) -> TypeCheckResult<CheckedStatement> {
@@ -853,9 +1054,9 @@ pub fn typecheck_statement(
             assign_op,
             rhs,
         } => {
-            let lhs = typecheck_access_expression(program, scope, lhs)?;
+            let lhs = typecheck_access_expression(program, types, scope, lhs)?;
 
-            let rhs = eval_lhs_and_check!(program, scope, rhs, lhs.type_id(), AssignmentMissmatch)?;
+            let rhs = eval_rhs_and_check!(program, types, scope, lhs, rhs, AssignmentMissmatch)?;
 
             // Just here so the compile fails if I add more assing ops that might change the type.
             match assign_op {
@@ -870,43 +1071,46 @@ pub fn typecheck_statement(
             }
         }
         Statement::Expression(expression) => {
-            CheckedStatement::Expression(typecheck_expression(program, scope, expression)?)
+            CheckedStatement::Expression(typecheck_expression(program, types, scope, expression)?)
         }
     })
 }
 
 pub fn typecheck_expression(
     program: &CheckedProgram,
+    types: &mut DefinedTypes,
     scope: &Scope,
     expression: Expression,
 ) -> TypeCheckResult<CheckedExpression> {
     Ok(match expression {
         Expression::Access(access) => {
-            CheckedExpression::Access(typecheck_access_expression(program, scope, access)?)
+            CheckedExpression::Access(typecheck_access_expression(program, types, scope, access)?)
         }
         Expression::Binary { lhs, op, rhs } => {
-            let lhs = typecheck_access_expression(program, scope, lhs)?;
+            let lhs = typecheck_access_expression(program, types, scope, lhs)?;
 
-            let rhs = Box::new(eval_lhs_and_check!(
+            let rhs = Box::new(eval_rhs_and_check!(
                 program,
+                types,
                 scope,
+                lhs,
                 *rhs,
-                lhs.type_id(),
                 BinaryExpressionMissmatch
             )?);
 
             let type_id = match op {
                 // TODO: Allow more than just 'u64' to pass here
                 BinaryOp::Plus | BinaryOp::Minus => {
-                    check_binary_op(program, lhs.type_id(), rhs.type_id(), op, "u64")?;
-                    program.defined_types.get_id("u64").expect("u64 undefined")
+                    check_binary_op(
+                        types,
+                        lhs.type_id(),
+                        rhs.type_id(),
+                        op,
+                        TypeId::builtin("u64"),
+                    )?;
+                    TypeId::builtin("u64")
                 }
-                BinaryOp::EqualEqual => {
-                    program // TODO: Restrict what types can be equality-compared
-                        .defined_types
-                        .get_id("bool")
-                        .expect("bool undefined")
-                }
+                BinaryOp::EqualEqual => TypeId::builtin("bool"),
             };
 
             CheckedExpression::Binary {
@@ -920,25 +1124,20 @@ pub fn typecheck_expression(
 }
 
 fn check_binary_op(
-    program: &CheckedProgram,
+    types: &mut DefinedTypes,
     lhs_type: TypeId,
     rhs_type: TypeId,
     op: BinaryOp,
-    expected_type: &str,
+    expected_type_id: TypeId,
 ) -> TypeCheckResult<()> {
-    let expected_type_id = program
-        .defined_types
-        .get_id(expected_type)
-        .expect("Explicitly requested type name is undefined");
-
-    if !lhs_type.is_compatible_with(expected_type_id)
-        || !rhs_type.is_compatible_with(expected_type_id)
+    if !types.are_assignment_compatible(lhs_type, expected_type_id)
+        || !types.are_assignment_compatible(rhs_type, expected_type_id)
     {
         err!(BinaryOpType {
-            lhs_type: type_name(program, lhs_type),
-            rhs_type: type_name(program, lhs_type),
+            lhs_type: types.type_name(lhs_type),
+            rhs_type: types.type_name(rhs_type),
             op,
-            expected_type: expected_type.to_string(),
+            expected_type: types.type_name(expected_type_id),
         })
     } else {
         Ok(())
@@ -947,10 +1146,12 @@ fn check_binary_op(
 
 pub fn typecheck_access_expression(
     program: &CheckedProgram,
+    types: &mut DefinedTypes,
     scope: &Scope,
     access: AccessExpression,
 ) -> TypeCheckResult<CheckedAccessExpression> {
-    let lhs = typecheck_simple_expression(program, scope, access.lhs)?;
+    let access_clone = access.clone(); // TODO: Remove
+    let lhs = typecheck_simple_expression(program, types, scope, access.lhs)?;
 
     let mut type_id = lhs.type_id();
 
@@ -959,11 +1160,44 @@ pub fn typecheck_access_expression(
         .into_iter()
         .map(|indirection| match indirection {
             Indirection::Subscript { index_expr } => {
-                let index_expr = eval_lhs_and_check!(
+                let type_description = types.get_type_description(type_id);
+
+                // Check that the current type_id is an array
+                if let TypeDescription::GenericInstance {
+                    generic_id,
+                    type_arguments,
+                } = &type_description
+                {
+                    let array_type = types
+                        .get_generic("array")
+                        .expect("array generic type undefined");
+
+                    if *generic_id != array_type {
+                        return err!(NonArraySubscript {
+                            expr_type: types.type_name(type_id),
+                            expr: access_clone.clone(), // TODO: This is a little imprecise
+                        });
+                    }
+
+                    assert_eq!(type_arguments.len(), 1);
+
+                    // Expr type becomes the inner array type (first and only type argument)
+                    type_id = *type_arguments.first().unwrap();
+                } else {
+                    return err!(NonArraySubscript {
+                        expr_type: types.type_name(type_id),
+                        expr: access_clone.clone(), // TODO: This is a little imprecise
+                    });
+                }
+
+                // types.get_or_define_type(type_description);
+
+                let index_expr = eval_rhs_and_check!(
                     program,
+                    types,
                     scope,
+                    TypeId::builtin("u64"),
                     index_expr,
-                    program.defined_types.get_id("u64").expect("u64 undefined"),
                     ArraySubscript
                 )?;
 
@@ -973,7 +1207,14 @@ pub fn typecheck_access_expression(
                 Ok(CheckedIndirection::Subscript { index_expr })
             }
             Indirection::Field { field_name } => {
-                let accessed_struct = program.get_struct_for_type(type_id)?;
+                if type_id.is_builtin() {
+                    return err!(UndefinedStructField {
+                        struct_name: types.type_name(type_id),
+                        field_name,
+                    });
+                }
+
+                let accessed_struct = get_struct_for_type(program, types, type_id)?;
                 type_id = accessed_struct.type_of_field(&field_name)?;
 
                 Ok(CheckedIndirection::Field { field_name })
@@ -990,6 +1231,7 @@ pub fn typecheck_access_expression(
 
 pub fn typecheck_simple_expression(
     program: &CheckedProgram,
+    types: &mut DefinedTypes,
     scope: &Scope,
     simple: SimpleExpression,
 ) -> TypeCheckResult<CheckedSimpleExpression> {
@@ -998,18 +1240,23 @@ pub fn typecheck_simple_expression(
         SimpleExpression::NumberLiteral(value) => CheckedSimpleExpression::NumberLiteral(value),
         SimpleExpression::String(value) => CheckedSimpleExpression::String(value),
         SimpleExpression::ArrayLiteral(array) => {
-            let arr_type = if let Some(first) = array.first() {
-                typecheck_expression(program, scope, first.clone())?.type_id()
+            let element_type = if let Some(first) = array.first() {
+                typecheck_expression(program, types, scope, first.clone())?.type_id()
             } else {
-                // TODO: Is just ignoring type-check on an empty array just always fine? I don't
-                // think so.
-                TypeId::unchecked()
+                TypeId::unknown()
             };
 
             let elements = array
                 .into_iter()
-                .map(|expr| eval_lhs_and_check!(program, scope, expr, arr_type, ArrayMissmatch))
+                .map(|expr| {
+                    eval_rhs_and_check!(program, types, scope, element_type, expr, ArrayMissmatch)
+                })
                 .collect::<Result<_, _>>()?;
+
+            let arr_type = types.get_or_define_type(TypeDescription::GenericInstance {
+                generic_id: types.get_generic("array").expect("array undefined"),
+                type_arguments: vec![element_type],
+            });
 
             CheckedSimpleExpression::ArrayLiteral {
                 elements,
@@ -1035,11 +1282,12 @@ pub fn typecheck_simple_expression(
                 .iter()
                 .zip(arguments.into_iter())
                 .map(|(param, arg)| {
-                    eval_lhs_and_check!(
+                    eval_rhs_and_check!(
                         program,
+                        types,
                         scope,
-                        arg,
                         param,
+                        arg,
                         ParamArgMissmatch,
                         [("function", &function.name)]
                     )
@@ -1057,14 +1305,16 @@ pub fn typecheck_simple_expression(
                 CheckedSimpleExpression::StructLiteral {
                     type_name: None,
                     fields: Vec::new(),
-                    type_id: TypeId::unchecked(),
+                    type_id: types
+                        .get_struct("<empty_struct>")
+                        .expect("Empty struct undefined"),
                 }
             } else {
                 todo!("I'm not sure if I want to allow {{a: 2}} or {{a: int = 2}} literals without a type name, or just c-style literals.")
             }
         }
         SimpleExpression::Parentheses { inner } => CheckedSimpleExpression::Parentheses {
-            inner: Box::new(typecheck_expression(program, scope, *inner)?),
+            inner: Box::new(typecheck_expression(program, types, scope, *inner)?),
         },
         SimpleExpression::StateAccess { name } => {
             let type_id = program
@@ -1082,6 +1332,7 @@ pub fn typecheck_simple_expression(
             execution,
             access_expression: Box::new(typecheck_access_expression(
                 program,
+                types,
                 scope,
                 *access_expression,
             )?),
