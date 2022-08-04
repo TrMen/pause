@@ -90,7 +90,7 @@ procedure main {
         .others_copy[idx] = it;
     }
 
-    .variant_field = Optional::none;
+    .variant_field = Optional::some;
 
     .s.nested_variant_field = Optional::some(1);
 }

@@ -666,6 +666,12 @@ pub enum TypeCheckError {
     UndefinedEnum { name: String },
     #[error("Variant '{variant_name}' of enum '{enum_name}' is undefined")]
     UndefinedEnumVariant{ variant_name: String , enum_name: String },
+    #[error("Variant '{variant_name}' of enum '{enum_name}' has non-void type '{variant_type_name}' but no initializer")]
+    MissingEnumVariantInitializer {
+        enum_name: String,
+        variant_type_name: String,
+        variant_name: String,
+    },
     #[error("Call to undefined assertion '{name}'")]
     UndefinedAssertion { name: String },
     #[error("Call to undefined function '{name}'")]
@@ -1502,14 +1508,20 @@ pub fn typecheck_simple_expression(
                 type_id: *type_id,
             }
         }
-        SimpleExpression::EnumVariant { type_name, variant_name, initializer } => {
-            let enumeration = program.enums.get(&type_name).ok_or_else(|| wrap!(UndefinedEnum{name: type_name.to_string()}))?;
+        SimpleExpression::EnumVariant { enum_name, variant_name, initializer } => {
+            let enumeration = program.enums.get(&enum_name).ok_or_else(|| wrap!(UndefinedEnum{name: enum_name.to_string()}))?;
 
-            let variant = enumeration.variants.iter().find(|variant| variant.name == variant_name).ok_or_else(||wrap!(UndefinedEnumVariant {enum_name: type_name.clone(), variant_name: variant_name.clone()}))?;
+            let variant = enumeration.variants.iter().find(|variant| variant.name == variant_name).ok_or_else(||wrap!(UndefinedEnumVariant {enum_name: enum_name.clone(), variant_name: variant_name.clone()}))?;
+
+
+            if type_name(program, types, variant.type_id()) != "void" && initializer.is_none() {
+                return err!(MissingEnumVariantInitializer { variant_name, enum_name, variant_type_name: type_name(program, types, variant.type_id())});
+            }
 
             let initializer = initializer.map(|init| {
-                eval_rhs_and_check!(program, types, scope, variant.type_id(), *init, EnumVariantInitMissmatch, [("enum_name", type_name), ("variant_name", variant_name.clone())]).map(Box::new)
+                eval_rhs_and_check!(program, types, scope, variant.type_id(), *init, EnumVariantInitMissmatch, [("enum_name", enum_name), ("variant_name", variant_name.clone())]).map(Box::new)
             }).transpose()?;
+
 
             CheckedSimpleExpression::EnumVariant { type_id: enumeration.type_id(), variant_name, initializer }
 

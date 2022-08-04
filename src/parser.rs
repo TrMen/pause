@@ -15,7 +15,7 @@ pub enum SimpleExpression {
     },
     ArrayLiteral(Vec<Expression>),
     EnumVariant {
-        type_name: String, // I don't think a full parsed_type goes here, since it can only be an enum name
+        enum_name: String, // I don't think a full parsed_type goes here, since it can only be an enum name
         variant_name: String,
         initializer: Option<Box<Expression>>,
     },
@@ -817,7 +817,7 @@ impl Parser {
                         .transpose()?;
 
                     Ok(SimpleExpression::EnumVariant {
-                        type_name: next.lexeme.clone(),
+                        enum_name: next.lexeme.clone(),
                         variant_name,
                         initializer,
                     })
