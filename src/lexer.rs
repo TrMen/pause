@@ -39,6 +39,7 @@ pub enum TokenKind {
     Slash,
     Colon,
     Comma,
+    Enum,
     Bang,
     LeftParen,
     DoubleQuote,
@@ -157,6 +158,7 @@ impl<'a> Lexer<'a> {
             b'[' => TokenKind::LeftBracket,
             b']' => TokenKind::RightBracket,
             b't' => return Some(self.keyword_or_identifier("rue", TokenKind::True)),
+            b'e' => return Some(self.keyword_or_identifier("num", TokenKind::Enum)),
             b'f' => match self.advance()? {
                 b'a' => return Some(self.keyword_or_identifier("lse", TokenKind::False)),
                 b'o' => return Some(self.keyword_or_identifier("r", TokenKind::For)),

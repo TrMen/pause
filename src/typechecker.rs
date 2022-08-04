@@ -10,7 +10,7 @@ use crate::{
     lexer::{AssignOp, BinaryOp, ExecutionDesignator},
     parser::{
         AccessExpression, Assertion, Expression, Function, Indirection, ParsedType, Procedure,
-        Program, SimpleExpression, Statement, Struct,
+        Program, SimpleExpression, Statement, Struct, Enum,
     },
 };
 
@@ -32,7 +32,7 @@ macro_rules! wrap {
     };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeId {
     id: usize,
 }
@@ -135,6 +135,11 @@ pub enum CheckedSimpleExpression {
         elements: Vec<CheckedExpression>,
         type_id: TypeId,
     },
+    EnumVariant {
+        type_id: TypeId,
+        variant_name: String,
+        initializer: Option<Box<CheckedExpression>>,
+    },
     ExecutionAccess {
         execution: ExecutionDesignator,
         access_expression: Box<CheckedAccessExpression>,
@@ -182,6 +187,7 @@ impl Typed for CheckedSimpleExpression {
             CheckedSimpleExpression::StateAccess { type_id, .. } => *type_id,
             CheckedSimpleExpression::FunctionCall { type_id, .. } => *type_id,
             CheckedSimpleExpression::Parentheses { inner } => inner.type_id(),
+            CheckedSimpleExpression::EnumVariant { type_id, .. } => *type_id,
         }
     }
 }
@@ -225,7 +231,7 @@ impl Typed for CheckedAccessExpression {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[repr(u8)]
 pub enum BuiltinType {
     Void,
@@ -234,18 +240,19 @@ pub enum BuiltinType {
     String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeDescription {
     Builtin(BuiltinType),
     Unknown,
     Struct(TypeId),
+    Enum(TypeId),
     GenericInstance {
         generic_id: GenericId,
         type_arguments: Vec<TypeId>,
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Type {
     description: TypeDescription,
     type_id: TypeId,
@@ -263,7 +270,7 @@ pub enum TypeParameterCount {
     Variadic,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GenericId {
     id: usize,
 }
@@ -278,12 +285,12 @@ pub struct GenericType {
 #[derive(Debug, Clone)]
 pub struct DefinedTypes {
     // Includes builtins, all generic type instances used in the program,
-    // and structs. Structs are also kept in the struct field for lookup by name.
+    // and structs.
     concrete_types: Vec<Type>,
 
-    structs: HashMap<String, TypeId>,
     // Includes all generic types like array that can't be directly instanciated.
     generic_types: Vec<GenericType>,
+
     next_id: usize,
     next_generic_id: usize,
 }
@@ -295,7 +302,6 @@ impl DefinedTypes {
         let builtin_types = vec![Void, Bool, U64, String];
 
         let mut this = Self {
-            structs: HashMap::new(),
             generic_types: Vec::new(),
             next_id: builtin_types.len(),
             concrete_types: builtin_types
@@ -310,8 +316,6 @@ impl DefinedTypes {
         };
 
         this.define_generic("array".to_string(), TypeParameterCount::Fixed(1));
-
-        this.define_struct("<empty_struct>".to_string()).unwrap();
 
         this
     }
@@ -356,39 +360,6 @@ impl DefinedTypes {
             })
     }
 
-    fn are_assignment_compatible(&self, lhs: TypeId, rhs: TypeId) -> bool {
-        if let TypeDescription::Struct(_) = self.get_type_description(lhs)
-            && rhs == self.get_struct("<empty_struct>").unwrap() {
-            true
-        }
-        else if self.is_instance_of(lhs, self.get_generic("array").unwrap()) && 
-            let TypeDescription::GenericInstance { generic_id: generic_id_rhs, type_arguments: type_arguments_rhs } = self.get_type_description(rhs)
-            && generic_id_rhs == self.get_generic("array").unwrap()
-            && *type_arguments_rhs.first().unwrap() == TypeId::unknown(){
-                // rhs is an empty array literal, and lhs is any array type
-                true
-            }
-        else {lhs.is_exactly(rhs)}
-    }
-
-    pub fn define_struct(&mut self, name: String) -> TypeCheckResult<TypeId> {
-        if self.structs.contains_key(&name) {
-            return err!(StructRedefinition { name });
-        }
-
-        let type_id = TypeId { id: self.next_id };
-        self.next_id += 1;
-
-        self.concrete_types.push(Type {
-            type_id,
-            description: TypeDescription::Struct(type_id),
-        });
-
-        self.structs.insert(name, type_id);
-
-        Ok(type_id)
-    }
-
     fn get_type_description(&self, id: TypeId) -> TypeDescription {
         if id == TypeId::unknown() {
             TypeDescription::Unknown
@@ -398,92 +369,19 @@ impl DefinedTypes {
         }
     }
 
-    pub fn type_name(&self, id: TypeId) -> String {
-        let description = self.get_type_description(id);
-
-        match description {
-            TypeDescription::Builtin(builtin) => match builtin {
-                BuiltinType::Void => "void".to_string(),
-                BuiltinType::Bool => "bool".to_string(),
-                BuiltinType::U64 => "u64".to_string(),
-                BuiltinType::String => "string".to_string(),
-            },
-            TypeDescription::Unknown => "<unknown>".to_string(),
-            TypeDescription::Struct(type_id) => self
-                .structs
-                .iter()
-                .find(|p| p.1.is_exactly(type_id))
-                .map(|p| p.0.to_string())
-                .unwrap_or_else(|| {
-                    panic!("Asked for struct by undefined type id '{:#?}'", type_id)
-                }),
-            TypeDescription::GenericInstance {
-                generic_id,
-                type_arguments,
-            } => {
-                let generic_type = self
-                    .generic_types
-                    .iter()
-                    .find(|g| g.generic_id == generic_id)
-                    .unwrap();
-
-                if generic_type.name == "array" {
-                    assert_eq!(type_arguments.len(), 1);
-
-                    format!("[{}]", self.type_name(type_arguments[0]))
-                } else {
-                    todo!("Non-array generics");
-                }
-            }
-        }
-    }
-
-    fn get_struct(&self, name: &str) -> TypeCheckResult<TypeId> {
-        self.structs
-            .get(name)
-            .ok_or_else(|| {
-                wrap!(UndefinedType {
-                    name: name.to_string()
-                })
-            })
-            .copied()
-    }
-
-    fn typecheck_parsed_type(&mut self, parsed_type: &ParsedType) -> TypeCheckResult<TypeId> {
-        Ok(match &parsed_type {
-            // Unwrap: ParsedTypes occur in the source code, so they must be build-in or
-            // user-d&efined
-            ParsedType::Simple { name } => match name.as_str() {
-                name @ ("u64" | "string" | "bool") => TypeId::builtin(name),
-                _ => self.get_struct(name)?,
-            },
-            ParsedType::Array { inner } => {
-                let inner_id = self.typecheck_parsed_type(inner)?;
-
-                let array_type_id = self
-                    .generic_types
-                    .iter()
-                    .find(|generic| generic.name == "array")
-                    .expect("array type undefined")
-                    .generic_id;
-
-                self.get_or_define_type(TypeDescription::GenericInstance {
-                    generic_id: array_type_id,
-                    type_arguments: vec![inner_id],
-                })
-            }
-
-            ParsedType::Void => TypeId::builtin("void"),
-            ParsedType::Unknown => TypeId::unknown(),
-        })
-    }
-
     fn get_or_define_type(&mut self, description: TypeDescription) -> TypeId {
         if let Some(existing) = self
             .concrete_types
             .iter()
             .enumerate()
-            .find(|(_, typ)| typ.description == description)
+            .find(|(_, typ)| {
+                match description {
+                    TypeDescription::Unknown => panic!("Trying to define unknown type"),
+                    TypeDescription::Struct(type_id) => if type_id == TypeId::unknown() { false } else { description == typ.description },
+                    TypeDescription::Enum(type_id) => if type_id == TypeId::unknown() { false } else { description == typ.description },
+                    _ => description == typ.description,
+                }
+            })
         {
             TypeId { id: existing.0 }
         } else {
@@ -498,6 +396,82 @@ impl DefinedTypes {
             });
 
             type_id
+        }
+    }
+}
+
+fn print_defined_types(program: &CheckedProgram, types: &DefinedTypes) {
+    println!("Concrete types:");
+    for concrete_type in &types.concrete_types {
+        println!("{}: '{}'", concrete_type.type_id().id, type_name(program, types, concrete_type.type_id()))
+    }
+    println!("\nGeneric Types:");
+    for generic_type in &types.generic_types {
+        println!("{}: '{}'", generic_type.generic_id.id, generic_type.name);
+    }
+}
+
+fn are_assignment_compatible(program: &CheckedProgram, types: &DefinedTypes, lhs: TypeId, rhs: TypeId) -> bool {
+    if let TypeDescription::Struct(_)= types.get_type_description(lhs)
+        && rhs == program.structs.get("<empty_struct>").unwrap().type_id {
+        true
+    }
+    else if types.is_instance_of(lhs, types.get_generic("array").unwrap()) && 
+        let TypeDescription::GenericInstance { generic_id: generic_id_rhs, type_arguments: type_arguments_rhs } = types.get_type_description(rhs)
+        && generic_id_rhs == types.get_generic("array").unwrap()
+        && *type_arguments_rhs.first().unwrap() == TypeId::unknown(){
+            // rhs is an empty array literal, and lhs is any array type
+            true
+        }
+    else {lhs.is_exactly(rhs)}
+}
+
+pub fn type_name(program: &CheckedProgram, types: &DefinedTypes, id: TypeId) -> String {
+    match types.get_type_description(id) {
+        TypeDescription::Builtin(builtin) => match builtin {
+            BuiltinType::Void => "void".to_string(),
+            BuiltinType::Bool => "bool".to_string(),
+            BuiltinType::U64 => "u64".to_string(),
+            BuiltinType::String => "string".to_string(),
+        },
+        TypeDescription::Unknown => "<unknown>".to_string(),
+        TypeDescription::Struct(_)=> {
+                program
+                .structs
+                .iter()
+                .find(|p| p.1.type_id().is_exactly(id))
+                .map(|p| p.0.to_string())
+                .unwrap_or_else(|| {
+                    panic!("Asked for struct by undefined type id '{:#?}'", id)
+                })
+            }
+        TypeDescription::GenericInstance {
+            generic_id,
+            type_arguments,
+        } => {
+            let generic_type = types
+                .generic_types
+                .iter()
+                .find(|g| g.generic_id == generic_id)
+                .unwrap();
+
+            if generic_type.name == "array" {
+                assert_eq!(type_arguments.len(), 1);
+
+                format!("[{}]", type_name(program, types, type_arguments[0]))
+            } else {
+                todo!("Non-array generics");
+            }
+        }
+        TypeDescription::Enum(_)=>{
+            program
+            .enums
+            .iter()
+            .find(|e| e.1.type_id().is_exactly(id))
+            .map(|e| e.0.to_string())
+            .unwrap_or_else(|| {
+                panic!("Asked for struct by undefined type id '{:#?}'", id)
+            })
         }
     }
 }
@@ -521,6 +495,13 @@ impl Typed for CheckedStructField {
 pub struct CheckedStruct {
     pub name: String,
     pub fields: Vec<CheckedStructField>,
+    pub type_id: TypeId,
+}
+
+impl Typed for CheckedStruct {
+    fn type_id(&self) -> TypeId {
+        self.type_id
+    }
 }
 
 impl CheckedStruct {
@@ -591,6 +572,33 @@ pub struct CheckedProcedure {
     pub body: Vec<CheckedStatement>,
 }
 
+
+#[derive(Debug, Clone)]
+pub struct CheckedEnumVariant {
+    pub name: String,
+    pub variant_type: TypeId,
+}
+
+impl Typed for CheckedEnumVariant {
+    fn type_id(&self) -> TypeId {
+        self.variant_type
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckedEnum {
+    pub name: String,
+    pub variants: Vec<CheckedEnumVariant>,
+    pub type_id: TypeId,
+}
+
+impl Typed for CheckedEnum {
+    fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+}
+
+
 #[derive(Debug, Clone)]
 pub struct CheckedProgram {
     // TODO: This duplicates the name. But I think I really want to be able to pass a Procedure
@@ -599,6 +607,7 @@ pub struct CheckedProgram {
     pub functions: HashMap<String, CheckedFunction>,
     pub assertions: HashMap<String, CheckedAssertion>,
     pub procedures: HashMap<String, CheckedProcedure>,
+    pub enums: HashMap<String, CheckedEnum>,
     pub main: CheckedProcedure,
 }
 
@@ -608,6 +617,7 @@ impl CheckedProgram {
         functions: HashMap<String, CheckedFunction>,
         assertions: HashMap<String, CheckedAssertion>,
         procedures: HashMap<String, CheckedProcedure>,
+        enums: HashMap<String, CheckedEnum>,
         main: CheckedProcedure,
     ) -> Self {
         Self {
@@ -615,6 +625,7 @@ impl CheckedProgram {
             assertions,
             functions,
             structs,
+            enums,
             main,
         }
     }
@@ -625,12 +636,12 @@ pub fn get_struct_for_type<'a>(
     types: &DefinedTypes,
     id: TypeId,
 ) -> TypeCheckResult<&'a CheckedStruct> {
-    let type_name = types.type_name(id);
+    let type_name = type_name(program, types, id);
 
     Ok(program
         .structs
         .get(&type_name)
-        .expect("Struct is not defined in program despite being found in defined types"))
+        .unwrap_or_else(|| panic!("Struct '{}' is not defined in program despite being found in defined types", type_name)))
 }
 
 #[derive(Error, Debug)]
@@ -651,6 +662,10 @@ pub enum TypeCheckError {
     BinaryExpressionMissmatch { common: TypeCheckErrorCommon },
     #[error("Assertions must contain exactly one expression that evalutes to a boolean value. '{common}'")]
     AssertionExpressionType { common: TypeCheckErrorCommon },
+    #[error("Undefined enum '{name}'")]
+    UndefinedEnum { name: String },
+    #[error("Variant '{variant_name}' of enum '{enum_name}' is undefined")]
+    UndefinedEnumVariant{ variant_name: String , enum_name: String },
     #[error("Call to undefined assertion '{name}'")]
     UndefinedAssertion { name: String },
     #[error("Call to undefined function '{name}'")]
@@ -683,6 +698,8 @@ pub enum TypeCheckError {
     },
     #[error("Incorrect argument type for call to function '{}'. Expression '{:#?}' evaluates to '{}'. Expected '{}'", .common.context["function"], .common.expr, .common.actual, .common.expected)]
     ParamArgMissmatch { common: TypeCheckErrorCommon },
+    #[error("Trying to initialize variant '{}' of enum '{}' with expression '{:#?} that evaluates to type '{}'. Variant has type '{}'", .common.context["variant_name"], .common.context["enum_name"], .common.expr, .common.actual, .common.expected)]
+    EnumVariantInitMissmatch { common: TypeCheckErrorCommon },
     #[error("Struct '{name}' is already defined.")]
     StructRedefinition { name: String },
     #[error(
@@ -751,12 +768,12 @@ macro_rules! eval_rhs_and_check {
     ($program:expr, $types:expr, $scope:expr ,$assignee:expr, $rhs:expr, $error:ident) => {{
         let rhs_checked = typecheck_expression($program, $types, $scope, $rhs)?;
 
-        if !$types.are_assignment_compatible($assignee.type_id(), rhs_checked.type_id()) {
+        if !are_assignment_compatible($program, $types, $assignee.type_id(), rhs_checked.type_id()) {
             err!(TypeCheckError::$error {
                 common: TypeCheckErrorCommon {
-                    actual: $types.type_name(rhs_checked.type_id()),
+                    actual: type_name($program, $types, rhs_checked.type_id()),
                     expr: rhs_checked,
-                    expected: $types.type_name($assignee.type_id()),
+                    expected: type_name($program, $types, $assignee.type_id()),
                     context: HashMap::new(),
                 },
             })
@@ -773,12 +790,12 @@ macro_rules! eval_rhs_and_check {
 
         let rhs_checked = typecheck_expression($program, $types, $scope, $rhs)?;
 
-        if !$types.are_assignment_compatible($assignee.type_id(), rhs_checked.type_id()) {
+        if !are_assignment_compatible($program, $types,$assignee.type_id(), rhs_checked.type_id()) {
             err!(TypeCheckError::$error {
                 common: TypeCheckErrorCommon {
-                    actual: $types.type_name(rhs_checked.type_id()),
+                    actual: type_name($program, $types, rhs_checked.type_id()),
                     expr: rhs_checked,
-                    expected: $types.type_name($assignee.type_id()),
+                    expected: type_name($program, $types, $assignee.type_id()),
                     context,
                 },
             })
@@ -788,17 +805,42 @@ macro_rules! eval_rhs_and_check {
     }};
 }
 
-pub fn typecheck_program(program: Program) -> TypeCheckResult<CheckedProgram> {
-    // Predecl all structs so they can be used in function definitions
+pub fn typecheck_program(mut program: Program) -> TypeCheckResult<CheckedProgram> {
+    let mut types = DefinedTypes::from_builtin();
+
+    // TODO: remove this hack
+    program.structs.insert("<empty_struct>".to_string(), Struct {name: "<empty_struct>".to_string(), fields: Vec::new()});
+
+    // Predecl all structs so they can be used in function type signatures
     let predecl_structs: HashMap<_, _> = program
         .structs
         .iter()
         .map(|s| {
+            let type_id = types.get_or_define_type(TypeDescription::Struct(TypeId::unknown()));
             (
                 s.0.clone(),
                 CheckedStruct {
                     name: s.0.clone(),
                     fields: Vec::new(),
+                    type_id,
+                },
+            )
+        })
+        .collect();
+
+
+    // Predecl all enums so they can be used in function type signatures
+    let predecl_enums: HashMap<_, _> = program
+        .enums
+        .iter()
+        .map(|s| {
+                let type_id = types.get_or_define_type(TypeDescription::Enum(TypeId::unknown()));
+            (
+                s.0.clone(),
+                CheckedEnum {
+                    name: s.0.clone(),
+                    variants: Vec::new(),
+                    type_id,
                 },
             )
         })
@@ -825,22 +867,30 @@ pub fn typecheck_program(program: Program) -> TypeCheckResult<CheckedProgram> {
         })
         .collect();
 
-    let mut types = DefinedTypes::from_builtin();
-
-    for name in predecl_structs.keys() {
-        types.define_struct(name.clone())?;
-    }
 
     let mut checked_program = CheckedProgram::new(
         predecl_structs,
         predecl_functions,
         HashMap::new(),
         HashMap::new(),
+        predecl_enums,
         CheckedProcedure {
             name: "main".to_string(),
             body: Vec::new(),
         },
     );
+
+    print_defined_types(&checked_program, &types);
+
+    checked_program.enums = program.enums.into_iter().map(|e| {
+        Ok((e.0.clone(), typecheck_enum(&checked_program, &mut types, &GLOBAL_SCOPE, e.1)?))
+    }).collect::<Result<_, _>>()?;
+
+
+    // TODO: I need another step here because at this point struct types are not evaluated, so
+    // using structs inside a function expression won't work. In realtity, I need to typecheck
+    // function signatures, struct signatures, and enum signatures first, then function expressions
+    // and struct field initializers.
 
     // Then typecheck functions, since they can only use structs and buildin types, or other
     // functions
@@ -850,7 +900,7 @@ pub fn typecheck_program(program: Program) -> TypeCheckResult<CheckedProgram> {
         .map(|f| {
             Ok((
                 f.0.clone(),
-                typecheck_function(&checked_program, &mut types, &GLOBAL_SCOPE, f.1)?,
+                typecheck_function(&checked_program, &mut types, &GLOBAL_SCOPE, f.1)?
             ))
         })
         .collect::<Result<HashMap<_, _>, _>>()?;
@@ -914,6 +964,36 @@ pub fn typecheck_program(program: Program) -> TypeCheckResult<CheckedProgram> {
     Ok(checked_program)
 }
 
+fn typecheck_enum(
+    program: &CheckedProgram,
+    types: &mut DefinedTypes,
+    _scope: &Scope,
+    enumeration: Enum,
+) -> TypeCheckResult<CheckedEnum> {
+    check_unique(enumeration.variants.iter().map(|e| &e.name))?;
+
+    let variants = enumeration
+        .variants
+        .into_iter()
+        .map(|variant| {
+            let variant_type = typecheck_parsed_type(program, types, &variant.parsed_type)?;
+
+            Ok(CheckedEnumVariant {
+                name: variant.name,
+                variant_type,
+            })
+        })
+        .collect::<Result<_, _>>()?;
+
+    Ok(CheckedEnum {
+        type_id: program.enums.get(&enumeration.name).expect("Enum not predeclared").type_id,
+        name: enumeration.name,
+        variants,
+    })
+}
+
+
+
 fn typecheck_struct(
     program: &CheckedProgram,
     types: &mut DefinedTypes,
@@ -926,15 +1006,15 @@ fn typecheck_struct(
         .fields
         .into_iter()
         .map(|field| {
-            let field_type = types.typecheck_parsed_type(&field.parsed_type)?;
+            let field_type = typecheck_parsed_type(program, types, &field.parsed_type)?;
             let initializer = typecheck_expression(program, types, scope, field.initializer)?;
 
-            if !types.are_assignment_compatible(field_type.type_id(), initializer.type_id()) {
+            if !are_assignment_compatible(program, types, field_type.type_id(), initializer.type_id()) {
                 return err!(FieldInitializerMissmatch {
                     common: TypeCheckErrorCommon {
-                        actual: types.type_name(initializer.type_id()),
+                        actual: type_name(program, types, initializer.type_id()),
                         expr: initializer,
-                        expected: types.type_name(field_type.type_id()),
+                        expected: type_name(program, types,field_type.type_id()),
                         context: HashMap::new(),
                     },
                 });
@@ -949,10 +1029,44 @@ fn typecheck_struct(
         .collect::<Result<_, _>>()?;
 
     Ok(CheckedStruct {
+        type_id: program.structs.get(&structure.name).expect("Struct not predeclared").type_id,
         name: structure.name,
         fields,
     })
 }
+
+    fn typecheck_parsed_type(program: &CheckedProgram, types: &mut DefinedTypes, parsed_type: &ParsedType) -> TypeCheckResult<TypeId> {
+        Ok(match &parsed_type {
+            // Unwrap: ParsedTypes occur in the source code, so they must be build-in or
+            // user-d&efined
+            ParsedType::Simple { name } => match name.as_str() {
+                name @ ("u64" | "string" | "bool") => TypeId::builtin(name),
+                _ => program.structs.get(name).map(|s| s.type_id())
+                    .or_else(|| program.enums.get(name).map(|e| e.type_id()))
+                    .ok_or_else(|| wrap!(UndefinedType{ name: name.clone() }))?,
+            },
+            ParsedType::Array { inner } => {
+                let inner_id = typecheck_parsed_type(program, types, inner)?;
+
+                let array_type_id = types
+                    .generic_types
+                    .iter()
+                    .find(|generic| generic.name == "array")
+                    .expect("array type undefined")
+                    .generic_id;
+
+                types.get_or_define_type(TypeDescription::GenericInstance {
+                    generic_id: array_type_id,
+                    type_arguments: vec![inner_id],
+                })
+            }
+
+            ParsedType::Void => TypeId::builtin("void"),
+            ParsedType::Unknown => TypeId::unknown(),
+        })
+    }
+
+
 
 fn typecheck_function(
     program: &CheckedProgram,
@@ -962,7 +1076,7 @@ fn typecheck_function(
 ) -> TypeCheckResult<CheckedFunction> {
     check_unique(function.params.iter().map(|param| &param.name))?;
 
-    let return_type = types.typecheck_parsed_type(&function.return_type)?;
+    let return_type = typecheck_parsed_type(program, types, &function.return_type)?;
 
     let params: Vec<_> = function
         .params
@@ -970,7 +1084,7 @@ fn typecheck_function(
         .map(|param| {
             Ok(CheckedFunctionParameter {
                 name: param.name.clone(),
-                type_id: types.typecheck_parsed_type(&param.parsed_type)?,
+                type_id: typecheck_parsed_type(program, types, &param.parsed_type)?,
             })
         })
         .collect::<Result<_, _>>()?;
@@ -1097,7 +1211,7 @@ pub fn typecheck_statement(
             let iterator = typecheck_expression(program, types, scope, iterator)?;
 
             if let TypeDescription::GenericInstance { generic_id, type_arguments } = types.get_type_description(iterator.type_id())
-                && generic_id == types.get_generic("aray").unwrap() {
+                && generic_id == types.get_generic("array").unwrap() {
 
                 let bindings = vec![Binding {name: "it".to_string(), type_id: *type_arguments.first().unwrap()},
                                     Binding {name: "idx".to_string(), type_id: TypeId::builtin("u64") }];
@@ -1112,7 +1226,7 @@ pub fn typecheck_statement(
             }
             else {
                 return err!(NonArrayIteration {
-                    type_name: types.type_name(iterator.type_id()),
+                    type_name: type_name(program, types, iterator.type_id()),
                     expr: iterator,
                 });
             }
@@ -1145,7 +1259,8 @@ pub fn typecheck_expression(
             let type_id = match op {
                 // TODO: Allow more than just 'u64' to pass here
                 BinaryOp::Plus | BinaryOp::Minus => {
-                    check_binary_op(
+                    typecheck_binary_op(
+                        program,
                         types,
                         lhs.type_id(),
                         rhs.type_id(),
@@ -1167,21 +1282,22 @@ pub fn typecheck_expression(
     })
 }
 
-fn check_binary_op(
+fn typecheck_binary_op(
+    program: &CheckedProgram,
     types: &mut DefinedTypes,
     lhs_type: TypeId,
     rhs_type: TypeId,
     op: BinaryOp,
-    expected_type_id: TypeId,
+    expected_type: TypeId,
 ) -> TypeCheckResult<()> {
-    if !types.are_assignment_compatible(lhs_type, expected_type_id)
-        || !types.are_assignment_compatible(rhs_type, expected_type_id)
+    if !lhs_type.is_exactly(expected_type)
+        || !rhs_type.is_exactly(expected_type)
     {
         err!(BinaryOpType {
-            lhs_type: types.type_name(lhs_type),
-            rhs_type: types.type_name(rhs_type),
+            lhs_type: type_name(program, types, lhs_type),
+            rhs_type: type_name(program, types, rhs_type),
             op,
-            expected_type: types.type_name(expected_type_id),
+            expected_type: type_name(program, types, expected_type),
         })
     } else {
         Ok(())
@@ -1218,7 +1334,7 @@ pub fn typecheck_access_expression(
 
                     if *generic_id != array_type {
                         return err!(NonArraySubscript {
-                            expr_type: types.type_name(type_id),
+                            expr_type: type_name(program, types,type_id),
                             expr: access_clone.clone(), // TODO: This is a little imprecise
                         });
                     }
@@ -1229,12 +1345,10 @@ pub fn typecheck_access_expression(
                     type_id = *type_arguments.first().unwrap();
                 } else {
                     return err!(NonArraySubscript {
-                        expr_type: types.type_name(type_id),
+                        expr_type: type_name(program, types,type_id),
                         expr: access_clone.clone(), // TODO: This is a little imprecise
                     });
                 }
-
-                // types.get_or_define_type(type_description);
 
                 let index_expr = eval_rhs_and_check!(
                     program,
@@ -1253,7 +1367,7 @@ pub fn typecheck_access_expression(
             Indirection::Field { field_name } => {
                 if type_id.is_builtin() {
                     return err!(UndefinedStructField {
-                        struct_name: types.type_name(type_id),
+                        struct_name: type_name(program, types,type_id),
                         field_name,
                     });
                 }
@@ -1349,9 +1463,8 @@ pub fn typecheck_simple_expression(
                 CheckedSimpleExpression::StructLiteral {
                     type_name: None,
                     fields: Vec::new(),
-                    type_id: types
-                        .get_struct("<empty_struct>")
-                        .expect("Empty struct undefined"),
+                    type_id: program.structs.get("<empty_struct>")
+                        .expect("Empty struct undefined").type_id,
                 }
             } else {
                 todo!("I'm not sure if I want to allow {{a: 2}} or {{a: int = 2}} literals without a type name, or just c-style literals.")
@@ -1389,5 +1502,17 @@ pub fn typecheck_simple_expression(
                 type_id: *type_id,
             }
         }
+        SimpleExpression::EnumVariant { type_name, variant_name, initializer } => {
+            let enumeration = program.enums.get(&type_name).ok_or_else(|| wrap!(UndefinedEnum{name: type_name.to_string()}))?;
+
+            let variant = enumeration.variants.iter().find(|variant| variant.name == variant_name).ok_or_else(||wrap!(UndefinedEnumVariant {enum_name: type_name.clone(), variant_name: variant_name.clone()}))?;
+
+            let initializer = initializer.map(|init| {
+                eval_rhs_and_check!(program, types, scope, variant.type_id(), *init, EnumVariantInitMissmatch, [("enum_name", type_name), ("variant_name", variant_name.clone())]).map(Box::new)
+            }).transpose()?;
+
+            CheckedSimpleExpression::EnumVariant { type_id: enumeration.type_id(), variant_name, initializer }
+
+        },
     })
 }

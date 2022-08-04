@@ -2,12 +2,16 @@ struct state {
     num: u64 = 0,
     stored: u64 = 0,
     s: some_struct = {},
-    others: [u64] = [],
+    others: [u64] = [1],
     others_copy: [u64] = [],
+
+    variant_field: Optional = Optional::some(2),
+    other_variant_field: Optional = Optional::none,
 }
 
 struct some_struct {
     num: u64 = 0,
+    nested_variant_field: Optional = Optional::none,
 }
 
 procedure increment {
@@ -50,6 +54,11 @@ function access(arr: [[u64]], index: u64) -> u64 {
     arr[index][2]
 }
 
+enum Optional {
+    some: u64,
+    none: void,
+}
+
 procedure main {
     .num = 2;
 
@@ -81,4 +90,7 @@ procedure main {
         .others_copy[idx] = it;
     }
 
+    .variant_field = Optional::none;
+
+    .s.nested_variant_field = Optional::some(1);
 }

@@ -14,6 +14,11 @@ pub enum SimpleExpression {
         fields: Vec<StructField>,
     },
     ArrayLiteral(Vec<Expression>),
+    EnumVariant {
+        type_name: String, // I don't think a full parsed_type goes here, since it can only be an enum name
+        variant_name: String,
+        initializer: Option<Box<Expression>>,
+    },
     ExecutionAccess {
         execution: ExecutionDesignator,
         access_expression: Box<AccessExpression>,
@@ -126,6 +131,18 @@ pub struct Assertion {
 }
 
 #[derive(Debug, Clone)]
+pub struct EnumVariant {
+    pub name: String,
+    pub parsed_type: ParsedType,
+}
+
+#[derive(Debug, Clone)]
+pub struct Enum {
+    pub name: String,
+    pub variants: Vec<EnumVariant>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Program {
     // TODO: This duplicates the name. But I think I really want to be able to pass a Procedure
     // around without having to also pass it's name.
@@ -133,6 +150,7 @@ pub struct Program {
     pub assertions: HashMap<String, Assertion>,
     pub functions: HashMap<String, Function>,
     pub structs: HashMap<String, Struct>,
+    pub enums: HashMap<String, Enum>,
     pub main: Procedure,
 }
 
@@ -150,6 +168,8 @@ pub enum ParseError {
     FunctionRedefinition(String),
     #[error("Struct '{0}' is already defined")]
     StructRedefinition(String),
+    #[error("Enum '{0}' is already defined")]
+    EnumRedefinition(String),
     #[error("Expected '{expected}' but got '{got:?}'")]
     Expected { expected: String, got: Token },
     #[error("Unexpected end of input")]
@@ -197,6 +217,7 @@ pub struct Parser {
     functions: HashMap<String, Function>,
     procedures: HashMap<String, Procedure>,
     structs: HashMap<String, Struct>,
+    enums: HashMap<String, Enum>,
 }
 
 // TODO: Why was that a macro again? I think because of borrowing rules
@@ -304,6 +325,7 @@ impl Parser {
             functions: HashMap::new(),
             procedures: HashMap::new(),
             structs: HashMap::new(),
+            enums: HashMap::new(),
         }
     }
 
@@ -441,6 +463,7 @@ impl Parser {
                 assertions: self.assertions,
                 functions: self.functions,
                 procedures: self.procedures,
+                enums: self.enums,
                 structs: self.structs,
             },
         ))
@@ -454,8 +477,38 @@ impl Parser {
             TokenKind::Assertion => self.assertion(),
             TokenKind::Function => self.function(),
             TokenKind::Struct => self.structure(),
+            TokenKind::Enum => self.enumeration(),
             _ => err("Invalid top level item", token)?,
         }
+    }
+
+    fn enumeration(&mut self) -> ParseResult<()> {
+        let name = self.expect(TokenKind::Identifier)?.lexeme.clone();
+
+        self.expect(TokenKind::LeftBrace)?;
+
+        let variants = collect_list!(
+            self,
+            |this: &mut Self| {
+                let name = this.expect(TokenKind::Identifier)?.lexeme.clone();
+
+                this.expect(TokenKind::Colon)?;
+
+                let parsed_type = this.parsed_type()?;
+
+                Ok(EnumVariant { parsed_type, name })
+            },
+            TokenKind::Comma,
+            TokenKind::RightBrace
+        )?;
+
+        if self.enums.contains_key(&name) {
+            return err!(EnumRedefinition(name));
+        }
+
+        self.enums.insert(name.clone(), Enum { name, variants });
+
+        Ok(())
     }
 
     fn structure(&mut self) -> ParseResult<()> {
@@ -510,11 +563,15 @@ impl Parser {
                     Ok(ParsedType::Array { inner })
                 }
             }
-            TokenKind::Identifier => Ok(ParsedType::Simple {
-                name: next.lexeme.to_string(),
-            }),
-            // TODO: How to handle void? I don't think anything is ever explicitly 'void' type, so
-            // doesn't need to be parsed
+            TokenKind::Identifier => {
+                if next.lexeme == "void" {
+                    Ok(ParsedType::Void)
+                } else {
+                    Ok(ParsedType::Simple {
+                        name: next.lexeme.to_string(),
+                    })
+                }
+            }
             _ => unexpected("type name", next)?,
         }
     }
@@ -742,6 +799,27 @@ impl Parser {
                     Ok(SimpleExpression::FunctionCall {
                         name: next.lexeme,
                         arguments,
+                    })
+                } else if advance_if_matches!(self, TokenKind::Colon)?.is_some() {
+                    self.expect(TokenKind::Colon)?;
+
+                    let variant_name = self.expect(TokenKind::Identifier)?.lexeme.clone();
+
+                    let initializer = advance_if_matches!(self, TokenKind::LeftParen)?
+                        .cloned()
+                        .map(|_| {
+                            let initializer = Box::new(self.expression()?);
+
+                            self.expect(TokenKind::RightParen)?;
+
+                            Ok(initializer)
+                        })
+                        .transpose()?;
+
+                    Ok(SimpleExpression::EnumVariant {
+                        type_name: next.lexeme.clone(),
+                        variant_name,
+                        initializer,
                     })
                 } else {
                     Ok(SimpleExpression::BindingAccess { name: next.lexeme })
