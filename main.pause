@@ -7,6 +7,8 @@ struct state {
 
     variant_field: Optional = Optional::some(2),
     other_variant_field: Optional = Optional::none,
+
+    some_string: string = "test_string",
 }
 
 struct some_struct {
@@ -90,7 +92,9 @@ procedure main {
         .others_copy[idx] = it;
     }
 
-    .variant_field = Optional::some;
+    .variant_field = Optional::some(2);
 
     .s.nested_variant_field = Optional::some(1);
+
+    .some_string = "str";
 }

@@ -42,7 +42,6 @@ pub enum TokenKind {
     Enum,
     Bang,
     LeftParen,
-    DoubleQuote,
     RightParen,
     LeftBrace,
     RightBrace,
@@ -143,7 +142,7 @@ impl<'a> Lexer<'a> {
                 Some(_) => TokenKind::DotDot,
                 None => TokenKind::Dot,
             },
-            b'"' => TokenKind::DoubleQuote,
+            b'"' => return Some(self.string()),
             b'=' => match self.advance_if_next_is(b'=') {
                 Some(_) => TokenKind::BinaryOp(BinaryOp::EqualEqual),
                 None => TokenKind::AssignOp(AssignOp::Equal),
@@ -193,13 +192,17 @@ impl<'a> Lexer<'a> {
         self.make_token(TokenKind::Number)
     }
 
+    fn string(&mut self) -> Token {
+        while self.advance() != Some(b'"') {
+            // Already advanced
+        }
+
+        self.make_token(TokenKind::String)
+    }
+
     fn identifier(&mut self) -> Token {
-        while let Some(c) = self.peek() {
-            if c.is_ascii_alphanumeric() || c == b'_' {
+        while let Some(c) = self.peek() && (c.is_ascii_alphanumeric() || c == b'_') {
                 self.advance();
-            } else {
-                return self.make_token(TokenKind::Identifier);
-            }
         }
 
         self.make_token(TokenKind::Identifier)
