@@ -10,6 +10,7 @@ use crate::{parser::Parser, typechecker::typecheck_program};
 // mod interpreter;
 mod lexer;
 // mod meta_interpreter;
+mod codegen;
 mod parser;
 mod typechecker;
 mod util;
@@ -32,9 +33,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(err) = checked_program {
         println!("{}\n{err}", err.backtrace);
     } else {
-        println!("SUCCESS!!");
+        println!("SUCCESS!!!");
+        let ast = serde_json::to_string(&checked_program?)?;
+
+        std::fs::write("ast", ast)?;
     }
 
+    //let codegen = typecheck_program(checked_program.unwrap());
+
+    //    match codegen {
+    //        Ok(_) => {
+    //            println!("SUCCESS!!!")
+    //        }
+    //        Err(err) => {
+    //            println!("{}\n{err}", err.backtrace);
+    //        }
+    //    }
+    //
     /*
 
     println!("{:#?}", program);

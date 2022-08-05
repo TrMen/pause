@@ -4,6 +4,7 @@ use std::{
     hash::Hash,
 };
 
+use serde::{Serialize, Deserialize};
 use thiserror::Error;
 
 use crate::{
@@ -32,7 +33,7 @@ macro_rules! wrap {
     };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq, Eq)]
 pub struct TypeId {
     id: usize,
 }
@@ -121,7 +122,7 @@ impl Scope {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CheckedSimpleExpression {
     Boolean(bool),
     String(String),
@@ -192,7 +193,7 @@ impl Typed for CheckedSimpleExpression {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CheckedExpression {
     Access(CheckedAccessExpression),
     Binary {
@@ -212,13 +213,13 @@ impl Typed for CheckedExpression {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CheckedIndirection {
     Subscript { index_expr: CheckedExpression },
     Field { field_name: String },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckedAccessExpression {
     pub lhs: CheckedSimpleExpression,
     pub indirections: Vec<CheckedIndirection>,
@@ -231,7 +232,7 @@ impl Typed for CheckedAccessExpression {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[repr(u8)]
 pub enum BuiltinType {
     Void,
@@ -240,7 +241,7 @@ pub enum BuiltinType {
     String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TypeDescription {
     Builtin(BuiltinType),
     Unknown,
@@ -252,7 +253,7 @@ pub enum TypeDescription {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Type {
     description: TypeDescription,
     type_id: TypeId,
@@ -264,25 +265,25 @@ impl Typed for Type {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TypeParameterCount {
     Fixed(usize),
     Variadic,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq, Eq)]
 pub struct GenericId {
     id: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenericType {
     name: String,
     generic_id: GenericId,
     parameter_count: TypeParameterCount,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DefinedTypes {
     // Includes builtins, all generic type instances used in the program,
     // and structs.
@@ -476,7 +477,7 @@ pub fn type_name(program: &CheckedProgram, types: &DefinedTypes, id: TypeId) -> 
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckedStructField {
     pub name: String,
     pub type_id: TypeId,
@@ -491,7 +492,7 @@ impl Typed for CheckedStructField {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckedStruct {
     pub name: String,
     pub fields: Vec<CheckedStructField>,
@@ -520,7 +521,7 @@ impl CheckedStruct {
 }
 
 // TODO: This looks a lot like StructField. But prolly makes sense to keep them separate
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckedFunctionParameter {
     pub name: String,
     pub type_id: TypeId,
@@ -532,7 +533,7 @@ impl Typed for CheckedFunctionParameter {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckedFunction {
     pub name: String,
     pub params: Vec<CheckedFunctionParameter>,
@@ -540,13 +541,13 @@ pub struct CheckedFunction {
     pub expression: CheckedExpression,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckedAssertion {
     pub name: String,
     pub predicate: CheckedExpression,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CheckedStatement {
     AssertionCall {
         name: String,
@@ -566,14 +567,14 @@ pub enum CheckedStatement {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckedProcedure {
     pub name: String,
     pub body: Vec<CheckedStatement>,
 }
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckedEnumVariant {
     pub name: String,
     pub variant_type: TypeId,
@@ -585,21 +586,14 @@ impl Typed for CheckedEnumVariant {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckedEnum {
     pub name: String,
     pub variants: Vec<CheckedEnumVariant>,
     pub type_id: TypeId,
 }
 
-impl Typed for CheckedEnum {
-    fn type_id(&self) -> TypeId {
-        self.type_id
-    }
-}
-
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckedProgram {
     // TODO: This duplicates the name. But I think I really want to be able to pass a Procedure
     // around without having to also pass it's name.
@@ -609,6 +603,13 @@ pub struct CheckedProgram {
     pub procedures: HashMap<String, CheckedProcedure>,
     pub enums: HashMap<String, CheckedEnum>,
     pub main: CheckedProcedure,
+}
+
+
+impl Typed for CheckedEnum {
+    fn type_id(&self) -> TypeId {
+        self.type_id
+    }
 }
 
 impl CheckedProgram {

@@ -1,2 +1,7 @@
 /target
 .vscode/
+ast
+ast.json
+.cache
+.clangd
+codegen/build/
