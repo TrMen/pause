@@ -11,7 +11,7 @@ use crate::{
     lexer::{AssignOp, BinaryOp, ExecutionDesignator, UnaryOp},
     parser::{
         AccessExpression, Assertion, Expression, Function, Indirection, ParsedType, Procedure,
-        Program, SimpleExpression, Statement, Struct, Enum, UnaryExpression,
+        Program, SimpleExpression, Statement, Struct, Enum, UnaryExpression, Pattern, MatchArm,
     },
 };
 
@@ -144,6 +144,18 @@ impl Typed for CheckedUnaryExpression {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckedMatchArm {
+    pattern: Pattern,
+    rhs: CheckedExpression,
+}
+
+impl Typed for CheckedMatchArm {
+    fn type_id(&self) -> TypeId {
+        self.rhs.type_id()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CheckedSimpleExpression {
     Boolean(bool),
     String(String),
@@ -151,6 +163,11 @@ pub enum CheckedSimpleExpression {
     StructLiteral {
         type_name: Option<String>,
         fields: Vec<CheckedStructField>,
+        type_id: TypeId,
+    },
+    Match {
+        expr: Box<CheckedExpression>,
+        arms: Vec<CheckedMatchArm>,
         type_id: TypeId,
     },
     ArrayLiteral {
@@ -210,6 +227,7 @@ impl Typed for CheckedSimpleExpression {
             CheckedSimpleExpression::FunctionCall { type_id, .. } => *type_id,
             CheckedSimpleExpression::Parentheses { inner } => inner.type_id(),
             CheckedSimpleExpression::EnumVariant { type_id, .. } => *type_id,
+            CheckedSimpleExpression::Match { type_id, .. } => *type_id,
         }
     }
 }
@@ -756,6 +774,20 @@ pub enum TypeCheckError {
     UnaryOpMissmatch {
         common: TypeCheckErrorCommon,
     },
+    #[error("Non-exhaustive patterns in arms of match expression. Expression '{expr:#?}' evaluates to type '{expr_type}' but match arms '{arms:#?}' do not cover all values of '{expr_type}'")]
+    NonExhaustiveMatch {
+        expr: CheckedExpression,
+        arms: Vec<MatchArm>,
+        expr_type: String,
+        // TODO: Add uncovered values
+    },
+    #[error("Match arm '{arm_pattern:?}' has incorrect type. Expression '{arm_expr:#?}' evaluates to type '{arm_type}'. Match expression type was previously inferred to be '{match_type}'")]
+    MatchTypeMissmatch {
+        arm_pattern: Pattern,
+        arm_type: String,
+        arm_expr: CheckedExpression,
+        match_type: String,
+    }
 }
 
 use TypeCheckError::*;
@@ -1567,6 +1599,44 @@ pub fn typecheck_simple_expression(
                 name,
                 type_id: *type_id,
             }
+        }
+        SimpleExpression::Match { expr, arms } => {
+            let expr = Box::new(typecheck_expression(program, types, scope, *expr)?);
+
+            let mut exhaustive = false;
+
+            let mut match_type = TypeId::unknown();
+
+            let unchecked_arms = arms.clone();
+
+            let arms = arms.into_iter().map(|arm| {
+                match arm.pattern {
+                    Pattern::Value(num) => {
+                        // TODO: Check values for exhaustiveness
+                    },
+                    Pattern::Else =>  {
+                        exhaustive = true;
+                    }
+                };
+
+                let rhs = typecheck_expression(program, types, scope, arm.rhs)?;
+                        if match_type == TypeId::unknown() {
+                            match_type = rhs.type_id();
+                        }
+
+                        if rhs.type_id() != match_type {
+                            return err!(MatchTypeMissmatch {match_type: type_name(program, types, match_type), arm_expr: rhs, arm_pattern: arm.pattern, arm_type: "u64".to_string()});
+                        }
+
+                        Ok(CheckedMatchArm{pattern: arm.pattern, rhs, })
+
+            }).collect::<Result<Vec<_>,_>>()?;
+
+            if !exhaustive || match_type == TypeId::unknown() {
+                return err!(NonExhaustiveMatch{expr_type: type_name(program, types, expr.type_id()), expr: *expr, arms: unchecked_arms, });
+            }
+
+            CheckedSimpleExpression::Match{ expr, arms, type_id: match_type }
         }
         SimpleExpression::EnumVariant { enum_name, variant_name, initializer } => {
             let enumeration = program.enums.get(&enum_name).ok_or_else(|| wrap!(UndefinedEnum{name: enum_name.to_string()}))?;

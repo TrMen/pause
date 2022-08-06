@@ -60,6 +60,14 @@ function access(arr: [[u64]], index: u64) -> u64 {
     arr[index][2]
 }
 
+function less_than_three (num: u64) -> bool {
+    match num {
+        1 => true,
+        2 => true,
+        else => false,
+    }
+}
+
 enum Optional {
     some: u64,
     none: void,
@@ -102,5 +110,15 @@ procedure main {
 
     .some_string = "str";
 
-    not negate(false) and 1;
+    not negate(false) and false;
+
+    match .num {
+        1 => 1,
+        else => 2,
+    };
+
+    .num = match .num {
+        1 => [1,2,3],
+        else => [4,5,6],
+    }[2] + 1;
 }

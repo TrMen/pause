@@ -31,12 +31,15 @@ pub enum TokenKind {
     String,
     True,
     False,
+    Else,
     BinaryOp(BinaryOp),
     AssignOp(AssignOp),
     UnaryOp(UnaryOp),
     ExecutionDesignator(ExecutionDesignator),
     Identifier,
     SmallArrow,
+    FatArrow,
+    Match,
     Procedure,
     Assertion,
     Function,
@@ -155,9 +158,16 @@ impl<'a> Lexer<'a> {
                 return Some(self.keyword_or_identifier("ot", TokenKind::UnaryOp(UnaryOp::Not)))
             }
             b'"' => return Some(self.string()),
-            b'=' => match self.advance_if_next_is(b'=') {
-                Some(_) => TokenKind::BinaryOp(BinaryOp::EqualEqual),
-                None => TokenKind::AssignOp(AssignOp::Equal),
+            b'=' => match self.peek() {
+                Some(b'=') => {
+                    self.advance();
+                    TokenKind::BinaryOp(BinaryOp::EqualEqual)
+                }
+                Some(b'>') => {
+                    self.advance();
+                    TokenKind::FatArrow
+                }
+                _ => TokenKind::AssignOp(AssignOp::Equal),
             },
             b'/' => TokenKind::Slash,
             b'c' => {
@@ -169,7 +179,11 @@ impl<'a> Lexer<'a> {
             b'[' => TokenKind::LeftBracket,
             b']' => TokenKind::RightBracket,
             b't' => return Some(self.keyword_or_identifier("rue", TokenKind::True)),
-            b'e' => return Some(self.keyword_or_identifier("num", TokenKind::Enum)),
+            b'm' => return Some(self.keyword_or_identifier("atch", TokenKind::Match)),
+            b'e' => match self.advance()? {
+                b'l' => return Some(self.keyword_or_identifier("se", TokenKind::Else)),
+                _ => return Some(self.keyword_or_identifier("um", TokenKind::Enum)),
+            },
             b'f' => match self.advance()? {
                 b'a' => return Some(self.keyword_or_identifier("lse", TokenKind::False)),
                 b'o' => return Some(self.keyword_or_identifier("r", TokenKind::For)),

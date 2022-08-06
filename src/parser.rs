@@ -1,8 +1,21 @@
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use std::{backtrace::Backtrace, collections::HashMap};
 
 use crate::lexer::{AssignOp, BinaryOp, ExecutionDesignator, Token, TokenKind, UnaryOp};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Pattern {
+    Value(u64), // TODO: Allow more than just numbers
+    Else,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub rhs: Expression,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SimpleExpression {
@@ -12,6 +25,10 @@ pub enum SimpleExpression {
     StructLiteral {
         name: Option<String>,
         fields: Vec<StructField>,
+    },
+    Match {
+        expr: Box<Expression>,
+        arms: Vec<MatchArm>,
     },
     ArrayLiteral(Vec<Expression>),
     EnumVariant {
@@ -758,10 +775,42 @@ impl Parser {
         }
     }
 
+    fn pattern(&mut self) -> ParseResult<Pattern> {
+        if let Some(num) = advance_if_matches!(self, TokenKind::Number)? {
+            Ok(Pattern::Value(str::parse(&num.lexeme).unwrap()))
+        } else if advance_if_matches!(self, TokenKind::Else)?.is_some() {
+            Ok(Pattern::Else)
+        } else {
+            unexpected("Pattern (value or 'else')", self.peek()?)?;
+        }
+    }
+
     fn simple_expression(&mut self) -> ParseResult<SimpleExpression> {
         let next = self.advance()?.clone();
 
         match next.kind {
+            TokenKind::Match => {
+                let expr = Box::new(self.expression()?);
+
+                self.expect(TokenKind::LeftBrace)?;
+
+                let arms = collect_list!(
+                    self,
+                    |this: &mut Self| {
+                        let pattern = this.pattern()?;
+
+                        this.expect(TokenKind::FatArrow)?;
+
+                        let rhs = this.expression()?;
+
+                        Ok(MatchArm { pattern, rhs })
+                    },
+                    TokenKind::Comma,
+                    TokenKind::RightBrace
+                )?;
+
+                Ok(SimpleExpression::Match { expr, arms })
+            }
             TokenKind::LeftParen => {
                 let inner = Box::new(self.expression()?);
                 self.expect(TokenKind::RightParen)?;
@@ -830,7 +879,7 @@ impl Parser {
                         .transpose()?;
 
                     Ok(SimpleExpression::EnumVariant {
-                        enum_name: next.lexeme.clone(),
+                        enum_name: next.lexeme,
                         variant_name,
                         initializer,
                     })
