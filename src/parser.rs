@@ -2,7 +2,7 @@ use thiserror::Error;
 
 use std::{backtrace::Backtrace, collections::HashMap};
 
-use crate::lexer::{AssignOp, BinaryOp, ExecutionDesignator, Token, TokenKind};
+use crate::lexer::{AssignOp, BinaryOp, ExecutionDesignator, Token, TokenKind, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SimpleExpression {
@@ -40,11 +40,20 @@ pub enum SimpleExpression {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
-    Access(AccessExpression),
+    Unary(UnaryExpression),
     Binary {
-        lhs: AccessExpression,
+        lhs: UnaryExpression,
         op: BinaryOp,
         rhs: Box<Expression>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnaryExpression {
+    Access(AccessExpression),
+    WithUnary {
+        op: UnaryOp,
+        expr: Box<UnaryExpression>,
     },
 }
 
@@ -296,13 +305,7 @@ macro_rules! collect_list {
 // (self, pattern) -> ParseResult<Option<PatternExtraction>>
 macro_rules! extract_if_kind_matches {
     ($self:expr, $p:path) => {{
-        let token = $self
-            .tokens
-            .get($self.index)
-            .ok_or_else(|| ParseErrorWrapper {
-                error: End("Unexpected end on input".to_string()),
-                backtrace: Backtrace::force_capture(),
-            })?;
+        let token = $self.peek()?;
 
         match token.kind {
             $p(value) => {
@@ -712,14 +715,14 @@ impl Parser {
     }
 
     fn expression(&mut self) -> ParseResult<Expression> {
-        let lhs = self.access_expression()?;
+        let lhs = self.unary_expression()?;
 
         if let Some(op) = extract_if_kind_matches!(self, TokenKind::BinaryOp)? {
             let rhs = Box::new(self.expression()?);
 
             Ok(Expression::Binary { lhs, op, rhs })
         } else {
-            Ok(Expression::Access(lhs))
+            Ok(Expression::Unary(lhs))
         }
     }
 
@@ -743,6 +746,16 @@ impl Parser {
         }
 
         Ok(AccessExpression { lhs, indirections })
+    }
+
+    fn unary_expression(&mut self) -> ParseResult<UnaryExpression> {
+        if let Some(op) = extract_if_kind_matches!(self, TokenKind::UnaryOp)? {
+            let expr = Box::new(self.unary_expression()?);
+
+            Ok(UnaryExpression::WithUnary { op, expr })
+        } else {
+            Ok(UnaryExpression::Access(self.access_expression()?))
+        }
     }
 
     fn simple_expression(&mut self) -> ParseResult<SimpleExpression> {

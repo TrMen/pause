@@ -11,6 +11,12 @@ pub enum BinaryOp {
     Plus,
     Minus,
     EqualEqual,
+    And,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnaryOp {
+    Not,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +33,7 @@ pub enum TokenKind {
     False,
     BinaryOp(BinaryOp),
     AssignOp(AssignOp),
+    UnaryOp(UnaryOp),
     ExecutionDesignator(ExecutionDesignator),
     Identifier,
     SmallArrow,
@@ -144,6 +151,9 @@ impl<'a> Lexer<'a> {
                 Some(_) => TokenKind::DotDot,
                 None => TokenKind::Dot,
             },
+            b'n' => {
+                return Some(self.keyword_or_identifier("ot", TokenKind::UnaryOp(UnaryOp::Not)))
+            }
             b'"' => return Some(self.string()),
             b'=' => match self.advance_if_next_is(b'=') {
                 Some(_) => TokenKind::BinaryOp(BinaryOp::EqualEqual),
@@ -166,7 +176,15 @@ impl<'a> Lexer<'a> {
                 b'u' => return Some(self.keyword_or_identifier("nction", TokenKind::Function)),
                 _ => return Some(self.identifier()),
             },
-            b'a' => return Some(self.keyword_or_identifier("ssertion", TokenKind::Assertion)),
+            b'a' => match self.advance()? {
+                b's' => return Some(self.keyword_or_identifier("sertion", TokenKind::Assertion)),
+                b'n' => {
+                    return Some(
+                        self.keyword_or_identifier("d", TokenKind::BinaryOp(BinaryOp::And)),
+                    )
+                }
+                _ => return Some(self.identifier()),
+            },
             b'p' => match self.advance()? {
                 b'r' => return Some(self.keyword_or_identifier("ocedure", TokenKind::Procedure)),
                 b'a' => {

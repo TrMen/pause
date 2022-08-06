@@ -8,10 +8,10 @@ use serde::{Serialize, Deserialize};
 use thiserror::Error;
 
 use crate::{
-    lexer::{AssignOp, BinaryOp, ExecutionDesignator},
+    lexer::{AssignOp, BinaryOp, ExecutionDesignator, UnaryOp},
     parser::{
         AccessExpression, Assertion, Expression, Function, Indirection, ParsedType, Procedure,
-        Program, SimpleExpression, Statement, Struct, Enum,
+        Program, SimpleExpression, Statement, Struct, Enum, UnaryExpression,
     },
 };
 
@@ -123,6 +123,27 @@ impl Scope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CheckedUnaryExpression {
+    Access(
+        CheckedAccessExpression,
+    ),
+    WithUnary{
+        op: UnaryOp,
+        expr: Box<CheckedUnaryExpression>,
+        type_id: TypeId,
+    }
+}
+
+impl Typed for CheckedUnaryExpression {
+    fn type_id(&self) -> TypeId {
+        match self {
+            CheckedUnaryExpression::Access(access) => access.type_id(),
+            CheckedUnaryExpression::WithUnary { type_id , .. } => *type_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CheckedSimpleExpression {
     Boolean(bool),
     String(String),
@@ -195,9 +216,9 @@ impl Typed for CheckedSimpleExpression {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CheckedExpression {
-    Access(CheckedAccessExpression),
+    Unary(CheckedUnaryExpression),
     Binary {
-        lhs: CheckedAccessExpression,
+        lhs: CheckedUnaryExpression,
         op: BinaryOp,
         rhs: Box<CheckedExpression>,
         type_id: TypeId,
@@ -207,9 +228,17 @@ pub enum CheckedExpression {
 impl Typed for CheckedExpression {
     fn type_id(&self) -> TypeId {
         match self {
-            CheckedExpression::Access(expr) => expr.type_id(),
+            CheckedExpression::Unary(expr) => expr.type_id(),
             CheckedExpression::Binary { type_id, .. } => *type_id,
         }
+    }
+}
+
+impl CheckedExpression {
+    fn garbage() -> Self {
+        CheckedExpression::Unary (
+            CheckedUnaryExpression::Access(CheckedAccessExpression{ lhs: CheckedSimpleExpression::Boolean(false), indirections: Vec::new(), type_id: TypeId::unknown()})
+        )
     }
 }
 
@@ -722,7 +751,11 @@ pub enum TypeCheckError {
     NonArrayIteration {
         type_name: String,
         expr: CheckedExpression,
-    }
+    },
+    #[error("Incorrect type for unary expression with operator '{}'. Expression '{:#?}' evaluates to type '{}'. Expected '{}'.", .common.context["op"], .common.expr, .common.actual, .common.expected)]
+    UnaryOpMissmatch {
+        common: TypeCheckErrorCommon,
+    },
 }
 
 use TypeCheckError::*;
@@ -864,11 +897,7 @@ pub fn typecheck_program(mut program: Program) -> TypeCheckResult<CheckedProgram
                     params: Vec::new(),
                     return_type: TypeId::unknown(),
                     // TODO: Maybe avoid having to put random stuff here.
-                    expression: CheckedExpression::Access(CheckedAccessExpression {
-                        lhs: CheckedSimpleExpression::Boolean(false),
-                        indirections: Vec::new(),
-                        type_id: TypeId::unknown(),
-                    }),
+                    expression: CheckedExpression::garbage(),
                 },
             )
         })
@@ -1248,11 +1277,11 @@ pub fn typecheck_expression(
     expression: Expression,
 ) -> TypeCheckResult<CheckedExpression> {
     Ok(match expression {
-        Expression::Access(access) => {
-            CheckedExpression::Access(typecheck_access_expression(program, types, scope, access)?)
+        Expression::Unary(expr) => {
+            CheckedExpression::Unary(typecheck_unary_expression(program, types, scope, expr)?)
         }
         Expression::Binary { lhs, op, rhs } => {
-            let lhs = typecheck_access_expression(program, types, scope, lhs)?;
+            let lhs = typecheck_unary_expression(program, types, scope, lhs)?;
 
             let rhs = Box::new(eval_rhs_and_check!(
                 program,
@@ -1276,7 +1305,7 @@ pub fn typecheck_expression(
                     )?;
                     TypeId::builtin("u64")
                 }
-                BinaryOp::EqualEqual => TypeId::builtin("bool"),
+                BinaryOp::EqualEqual | BinaryOp::And => TypeId::builtin("bool"),
             };
 
             CheckedExpression::Binary {
@@ -1392,6 +1421,36 @@ pub fn typecheck_access_expression(
         indirections,
         type_id,
     })
+}
+
+pub fn typecheck_unary_expression(
+    program: &CheckedProgram,
+    types: &mut DefinedTypes,
+    scope: &Scope,
+    unary: UnaryExpression,
+) -> TypeCheckResult<CheckedUnaryExpression> {
+    match unary {
+        UnaryExpression::Access(expr) => Ok(CheckedUnaryExpression::Access(typecheck_access_expression(program, types, scope, expr)?)),
+        UnaryExpression::WithUnary { op, expr } => {
+            match op {
+                UnaryOp::Not => {
+                    let expr = Box::new(typecheck_unary_expression(program, types, scope, *expr)?);
+                    if !are_assignment_compatible(program, types, expr.type_id(), TypeId::builtin("bool")) {
+                        return err!(UnaryOpMissmatch {
+                            common: TypeCheckErrorCommon {
+                            actual: type_name(program, types, expr.type_id()),
+                            expr: CheckedExpression::Unary(*expr),
+                            expected: type_name(program, types, TypeId::builtin("bool")),
+                            context: HashMap::from([("op".to_string(), "not".to_string())]),
+                            },
+                        })
+                    }
+
+                    Ok(CheckedUnaryExpression::WithUnary { op, expr, type_id: TypeId::builtin("bool") })
+                }
+            }
+        }
+    }
 }
 
 pub fn typecheck_simple_expression(

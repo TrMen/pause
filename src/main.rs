@@ -10,7 +10,6 @@ use crate::{parser::Parser, typechecker::typecheck_program};
 // mod interpreter;
 mod lexer;
 // mod meta_interpreter;
-mod codegen;
 mod parser;
 mod typechecker;
 mod util;

@@ -52,6 +52,10 @@ function add(lhs: u64, rhs: u64) -> u64 {
     lhs + rhs
 }
 
+function negate(predicate: bool) -> bool {
+    not predicate
+}
+
 function access(arr: [[u64]], index: u64) -> u64 {
     arr[index][2]
 }
@@ -97,4 +101,6 @@ procedure main {
     .s.nested_variant_field = Optional::some(1);
 
     .some_string = "str";
+
+    not negate(false) and 1;
 }
