@@ -2,7 +2,9 @@
 
 Pause is an early-stage, experimental, programming language. Its main idea is to allow interactive bug-solving while running the program. 
 For this, when an assertion failure is hit, the program will not abort, but instead pause execution and drop the user into a repl where they can inspect the program
-state and do various operations to recover correct state and fix the underlying issue. 
+state and do various operations to recover correct state and fix the underlying issue.
+
+The language has many ideas, many of which I will probably throw out later. For now, a sample of the syntax can be found in `main.pause`.
 
 ## Current state of development
 It's still very early stages. Currently, there is no ability to execute Pause programs. Only parsing and typechecking is implemented so far. 
@@ -31,8 +33,3 @@ When the program pauses, I plan to give the user the following capabilities (non
     - If yes, you can then store those changes. After the interactive session ends, they are stored as diffs on disk, and you can choose to include them in the real source code.
 - Storing a snapshot of state for later comparisson.
 - Continuing execution of the current timeline.
-
-
-
-
-The language has many ideas, many of which I will probably throw out later. For now, a sample of the syntax can be found in `main.pause`.
