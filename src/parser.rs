@@ -130,10 +130,11 @@ pub struct StructField {
     // TODO: Add modifiers like is_mutable
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Struct {
     pub name: String,
     pub fields: Vec<StructField>,
+    pub generic_parameters: Vec<GenericParameter>,
 }
 // TODO: This looks a lot like StructField. But prolly makes sense to keep them separate
 #[derive(Debug, Clone, PartialEq)]
@@ -142,12 +143,18 @@ pub struct FunctionParameter {
     pub parsed_type: ParsedType,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenericParameter {
+    pub name: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Function {
     pub name: String,
     pub params: Vec<FunctionParameter>,
     pub return_type: ParsedType,
     pub expression: Expression,
+    pub generic_parameters: Vec<GenericParameter>,
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +173,7 @@ pub struct EnumVariant {
 pub struct Enum {
     pub name: String,
     pub variants: Vec<EnumVariant>,
+    pub generic_parameters: Vec<GenericParameter>,
 }
 
 #[derive(Debug, Clone)]
@@ -416,12 +424,14 @@ impl Parser {
         params: Vec<FunctionParameter>,
         return_type: ParsedType,
         expression: Expression,
+        generic_parameters: Vec<GenericParameter>,
     ) -> ParseResult<()> {
         let func = Function {
             name: name.clone(),
             params,
             return_type,
             expression,
+            generic_parameters,
         };
 
         if self.functions.contains_key(&name) {
@@ -444,18 +454,32 @@ impl Parser {
         Ok(())
     }
 
-    fn define_struct(&mut self, name: String, fields: Vec<StructField>) -> ParseResult<()> {
+    fn define_struct(
+        &mut self,
+        name: String,
+        fields: Vec<StructField>,
+        generic_parameters: Vec<GenericParameter>,
+    ) -> ParseResult<()> {
         if self.structs.contains_key(&name) {
             return err!(StructRedefinition(name));
         }
 
+        let generics_empty = generic_parameters.is_empty();
+
         let structure = Struct {
             name: name.clone(),
             fields,
+            generic_parameters,
         };
 
         if name == "state" {
             self.state = Some(structure.clone());
+            if !generics_empty {
+                err(
+                    "'state' struct cannot have generic parameters.",
+                    self.peek()?,
+                )?;
+            }
         }
 
         self.structs.insert(name, structure);
@@ -505,6 +529,8 @@ impl Parser {
     fn enumeration(&mut self) -> ParseResult<()> {
         let name = self.expect(TokenKind::Identifier)?.lexeme.clone();
 
+        let generic_parameters = self.generic_parameters()?;
+
         self.expect(TokenKind::LeftBrace)?;
 
         let variants = collect_list!(
@@ -526,13 +552,22 @@ impl Parser {
             return err!(EnumRedefinition(name));
         }
 
-        self.enums.insert(name.clone(), Enum { name, variants });
+        self.enums.insert(
+            name.clone(),
+            Enum {
+                name,
+                variants,
+                generic_parameters,
+            },
+        );
 
         Ok(())
     }
 
     fn structure(&mut self) -> ParseResult<()> {
         let name = self.expect(TokenKind::Identifier)?.lexeme.clone();
+
+        let generic_parameters = self.generic_parameters()?;
 
         self.expect(TokenKind::LeftBrace)?;
 
@@ -563,7 +598,7 @@ impl Parser {
             TokenKind::RightBrace
         )?;
 
-        self.define_struct(name, fields)?;
+        self.define_struct(name, fields, generic_parameters)?;
 
         Ok(())
     }
@@ -610,8 +645,27 @@ impl Parser {
         Ok(())
     }
 
+    fn generic_parameters(&mut self) -> ParseResult<Vec<GenericParameter>> {
+        Ok(if advance_if_matches!(self, TokenKind::Less)?.is_some() {
+            collect_list!(
+                self,
+                |this: &mut Self| {
+                    Ok(GenericParameter {
+                        name: this.expect(TokenKind::Identifier)?.lexeme.clone(),
+                    })
+                },
+                TokenKind::Comma,
+                TokenKind::More
+            )?
+        } else {
+            Vec::new()
+        })
+    }
+
     fn function(&mut self) -> ParseResult<()> {
         let name = self.expect(TokenKind::Identifier)?.lexeme.clone();
+
+        let generic_parameters = self.generic_parameters()?;
 
         self.expect(TokenKind::LeftParen)?;
 
@@ -640,7 +694,7 @@ impl Parser {
 
         self.expect(TokenKind::RightBrace)?;
 
-        self.define_function(name, params, return_type, expression)?;
+        self.define_function(name, params, return_type, expression, generic_parameters)?;
 
         Ok(())
     }

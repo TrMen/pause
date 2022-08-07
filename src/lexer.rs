@@ -40,6 +40,8 @@ pub enum TokenKind {
     SmallArrow,
     FatArrow,
     Match,
+    Less,
+    More,
     Procedure,
     Assertion,
     Function,
@@ -176,6 +178,8 @@ impl<'a> Lexer<'a> {
                     TokenKind::ExecutionDesignator(ExecutionDesignator::Current),
                 ))
             }
+            b'<' => TokenKind::Less,
+            b'>' => TokenKind::More,
             b'[' => TokenKind::LeftBracket,
             b']' => TokenKind::RightBracket,
             b't' => return Some(self.keyword_or_identifier("rue", TokenKind::True)),

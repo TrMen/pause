@@ -11,7 +11,7 @@ use crate::{
     lexer::{AssignOp, BinaryOp, ExecutionDesignator, UnaryOp},
     parser::{
         AccessExpression, Assertion, Expression, Function, Indirection, ParsedType, Procedure,
-        Program, SimpleExpression, Statement, Struct, Enum, UnaryExpression, Pattern, MatchArm,
+        Program, SimpleExpression, Statement, Struct, Enum, UnaryExpression, Pattern, MatchArm, GenericParameter,
     },
 };
 
@@ -294,6 +294,7 @@ pub enum TypeDescription {
     Unknown,
     Struct(TypeId),
     Enum(TypeId),
+    GenericParameter(TypeId),
     GenericInstance {
         generic_id: GenericId,
         type_arguments: Vec<TypeId>,
@@ -344,6 +345,21 @@ pub struct DefinedTypes {
 }
 
 impl DefinedTypes {
+    pub fn with_generics(&self, program: &CheckedProgram, generics: &[GenericParameter]) -> TypeCheckResult<Self> {
+        let mut new = self.clone();
+
+        let generics = generics.iter()
+            .map(|generic|{ 
+                new.define_type(program, TypeDescription::GenericParameter(TypeId::unknown()))
+                    .map(|type_id| Type {description: new.get_type_description(type_id), type_id})
+            })
+            .collect::<Result<Vec<_>,_>>()?;
+
+        new.concrete_types.extend_from_slice(&generics);
+
+        Ok(new)
+    }
+
     pub fn from_builtin() -> Self {
         use BuiltinType::*;
 
@@ -415,6 +431,36 @@ impl DefinedTypes {
             // Because we insert them in order and give out the type id we just inserted
             self.concrete_types[id.id].description.clone()
         }
+    }
+
+    fn define_type(&mut self, program: &CheckedProgram, description: TypeDescription) -> TypeCheckResult<TypeId> {
+        if let Some(existing) = self
+            .concrete_types
+            .iter()
+            .find(|typ| {
+                match description {
+                    TypeDescription::Unknown => panic!("Trying to define unknown type"),
+                    TypeDescription::Struct(type_id) => if type_id == TypeId::unknown() { false } else { description == typ.description },
+                    TypeDescription::Enum(type_id) => if type_id == TypeId::unknown() { false } else { description == typ.description },
+                    _ => description == typ.description,
+                }
+            })
+        {
+            err!(StructRedefinition { name: type_name(program, self, existing.type_id()) })
+        } else {
+            self.next_id += 1;
+            let type_id = TypeId {
+                id: self.next_id - 1,
+            };
+
+            self.concrete_types.push(Type {
+                type_id,
+                description,
+            });
+
+            Ok(type_id)
+        }
+ 
     }
 
     fn get_or_define_type(&mut self, description: TypeDescription) -> TypeId {
@@ -521,6 +567,7 @@ pub fn type_name(program: &CheckedProgram, types: &DefinedTypes, id: TypeId) -> 
                 panic!("Asked for struct by undefined type id '{:#?}'", id)
             })
         }
+        TypeDescription::GenericParameter(_) => todo!(),
     }
 }
 
@@ -881,7 +928,7 @@ pub fn typecheck_program(mut program: Program) -> TypeCheckResult<CheckedProgram
     let mut types = DefinedTypes::from_builtin();
 
     // TODO: remove this hack
-    program.structs.insert("<empty_struct>".to_string(), Struct {name: "<empty_struct>".to_string(), fields: Vec::new()});
+    program.structs.insert("<empty_struct>".to_string(), Struct {name: "<empty_struct>".to_string(), fields: Vec::new(), generic_parameters: Vec::new()});
 
     // Predecl all structs so they can be used in function type signatures
     let predecl_structs: HashMap<_, _> = program
@@ -1069,6 +1116,8 @@ fn typecheck_struct(
     structure: Struct,
 ) -> TypeCheckResult<CheckedStruct> {
     check_unique(structure.fields.iter().map(|f| &f.name))?;
+
+    let struct_scope = types.with_generics(program, &structure.generic_parameters);
 
     let fields = structure
         .fields
@@ -1611,7 +1660,7 @@ pub fn typecheck_simple_expression(
 
             let arms = arms.into_iter().map(|arm| {
                 match arm.pattern {
-                    Pattern::Value(num) => {
+                    Pattern::Value(_num) => {
                         // TODO: Check values for exhaustiveness
                     },
                     Pattern::Else =>  {
@@ -1657,4 +1706,5 @@ pub fn typecheck_simple_expression(
 
         },
     })
+
 }

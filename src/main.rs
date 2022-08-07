@@ -1,7 +1,6 @@
 #![feature(never_type)]
 #![feature(backtrace)]
 #![feature(variant_count)]
-#![feature(let_chains)]
 
 use std::process::exit;
 

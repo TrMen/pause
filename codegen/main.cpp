@@ -1,5 +1,6 @@
 #include <fstream>
 #include <iostream>
+#include <string>
 
 // External includes
 #pragma clang diagnostic push
@@ -30,6 +31,7 @@ using json = nlohmann::json;
 //// Keeps track of which names are defined in the current scope and what their
 //// llvm representation is
 // static std::map<std::string, llvm::Value *> NamedValues;
+//
 //
 
 int main() {
