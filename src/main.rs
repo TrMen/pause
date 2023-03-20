@@ -1,14 +1,14 @@
+#![feature(provide_any)]
+#![feature(error_generic_member_access)]
+#![feature(let_chains)]
 #![feature(never_type)]
-#![feature(backtrace)]
 #![feature(variant_count)]
 
 use std::process::exit;
 
 // use crate::{meta_interpreter::MetaInterpreter, parser::Parser};
 use crate::{parser::Parser, typechecker::typecheck_program};
-// mod interpreter;
 mod lexer;
-// mod meta_interpreter;
 mod parser;
 mod typechecker;
 mod util;
@@ -48,24 +48,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //        }
     //    }
     //
-    /*
-
-    println!("{:#?}", program);
-
-    let mut meta = MetaInterpreter::new(state, program);
-
-    loop {
-        match meta.step()? {
-            Some(_) => continue,
-            None => {
-                println!("{}", meta);
-                println!("\n\nDone!");
-                break;
-            }
-        }
-    }
-
-    */
 
     Ok(())
 

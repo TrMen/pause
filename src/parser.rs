@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use std::{backtrace::Backtrace, collections::HashMap};
 
-use crate::lexer::{AssignOp, BinaryOp, ExecutionDesignator, Token, TokenKind, UnaryOp};
+use crate::lexer::{AssignOp, BinaryOp, Token, TokenKind, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Pattern {
@@ -35,10 +35,6 @@ pub enum SimpleExpression {
         enum_name: String, // I don't think a full parsed_type goes here, since it can only be an enum name
         variant_name: String,
         initializer: Option<Box<Expression>>,
-    },
-    ExecutionAccess {
-        execution: ExecutionDesignator,
-        access_expression: Box<AccessExpression>,
     },
     BindingAccess {
         name: String,
@@ -188,7 +184,7 @@ pub struct Program {
     pub main: Procedure,
 }
 
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ParseError {
     #[error("main procedure missing")]
     MissingMain,
@@ -941,18 +937,8 @@ impl Parser {
                     Ok(SimpleExpression::BindingAccess { name: next.lexeme })
                 }
             }
-            TokenKind::ExecutionDesignator(execution) => {
-                self.expect(TokenKind::Colon)?;
 
-                let access_expression = Box::new(self.access_expression()?);
-
-                Ok(SimpleExpression::ExecutionAccess {
-                    execution,
-                    access_expression,
-                })
-            }
-
-            _ => unexpected("Value or identifer access", &next)?,
+            _ => unexpected("Value or identifier access", &next)?,
         }
     }
 }

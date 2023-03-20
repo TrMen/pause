@@ -4,14 +4,15 @@ use std::{
     hash::Hash,
 };
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    lexer::{AssignOp, BinaryOp, ExecutionDesignator, UnaryOp},
+    lexer::{AssignOp, BinaryOp, UnaryOp},
     parser::{
-        AccessExpression, Assertion, Expression, Function, Indirection, ParsedType, Procedure,
-        Program, SimpleExpression, Statement, Struct, Enum, UnaryExpression, Pattern, MatchArm, GenericParameter,
+        AccessExpression, Assertion, Enum, Expression, Function, GenericParameter, Indirection,
+        MatchArm, ParsedType, Pattern, Procedure, Program, SimpleExpression, Statement, Struct,
+        UnaryExpression,
     },
 };
 
@@ -124,21 +125,19 @@ impl Scope {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CheckedUnaryExpression {
-    Access(
-        CheckedAccessExpression,
-    ),
-    WithUnary{
+    Access(CheckedAccessExpression),
+    WithUnary {
         op: UnaryOp,
         expr: Box<CheckedUnaryExpression>,
         type_id: TypeId,
-    }
+    },
 }
 
 impl Typed for CheckedUnaryExpression {
     fn type_id(&self) -> TypeId {
         match self {
             CheckedUnaryExpression::Access(access) => access.type_id(),
-            CheckedUnaryExpression::WithUnary { type_id , .. } => *type_id,
+            CheckedUnaryExpression::WithUnary { type_id, .. } => *type_id,
         }
     }
 }
@@ -179,10 +178,6 @@ pub enum CheckedSimpleExpression {
         variant_name: String,
         initializer: Option<Box<CheckedExpression>>,
     },
-    ExecutionAccess {
-        execution: ExecutionDesignator,
-        access_expression: Box<CheckedAccessExpression>,
-    },
     BindingAccess {
         name: String,
         type_id: TypeId,
@@ -219,9 +214,6 @@ impl Typed for CheckedSimpleExpression {
                 }
             }
             CheckedSimpleExpression::ArrayLiteral { type_id, .. } => *type_id,
-            CheckedSimpleExpression::ExecutionAccess {
-                access_expression, ..
-            } => access_expression.type_id(),
             CheckedSimpleExpression::BindingAccess { type_id, .. } => *type_id,
             CheckedSimpleExpression::StateAccess { type_id, .. } => *type_id,
             CheckedSimpleExpression::FunctionCall { type_id, .. } => *type_id,
@@ -254,9 +246,11 @@ impl Typed for CheckedExpression {
 
 impl CheckedExpression {
     fn garbage() -> Self {
-        CheckedExpression::Unary (
-            CheckedUnaryExpression::Access(CheckedAccessExpression{ lhs: CheckedSimpleExpression::Boolean(false), indirections: Vec::new(), type_id: TypeId::unknown()})
-        )
+        CheckedExpression::Unary(CheckedUnaryExpression::Access(CheckedAccessExpression {
+            lhs: CheckedSimpleExpression::Boolean(false),
+            indirections: Vec::new(),
+            type_id: TypeId::unknown(),
+        }))
     }
 }
 
@@ -337,7 +331,7 @@ pub struct DefinedTypes {
     // and structs.
     concrete_types: Vec<Type>,
 
-    // Includes all generic types like array that can't be directly instanciated.
+    // Includes all generic types like array that can't be directly instantiated.
     generic_types: Vec<GenericType>,
 
     next_id: usize,
@@ -345,15 +339,26 @@ pub struct DefinedTypes {
 }
 
 impl DefinedTypes {
-    pub fn with_generics(&self, program: &CheckedProgram, generics: &[GenericParameter]) -> TypeCheckResult<Self> {
+    pub fn with_generics(
+        &self,
+        program: &CheckedProgram,
+        generics: &[GenericParameter],
+    ) -> TypeCheckResult<Self> {
         let mut new = self.clone();
 
-        let generics = generics.iter()
-            .map(|generic|{ 
-                new.define_type(program, TypeDescription::GenericParameter(TypeId::unknown()))
-                    .map(|type_id| Type {description: new.get_type_description(type_id), type_id})
+        let generics = generics
+            .iter()
+            .map(|generic| {
+                new.define_type(
+                    program,
+                    TypeDescription::GenericParameter(TypeId::unknown()),
+                )
+                .map(|type_id| Type {
+                    description: new.get_type_description(type_id),
+                    type_id,
+                })
             })
-            .collect::<Result<Vec<_>,_>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
 
         new.concrete_types.extend_from_slice(&generics);
 
@@ -403,7 +408,7 @@ impl DefinedTypes {
     }
 
     fn is_instance_of(&self, instance: TypeId, generic: GenericId) -> bool {
-        if let TypeDescription::GenericInstance {generic_id, ..} = self.get_type_description(instance) 
+        if let TypeDescription::GenericInstance {generic_id, ..} = self.get_type_description(instance)
             && generic_id == generic {
             true
         }
@@ -433,20 +438,32 @@ impl DefinedTypes {
         }
     }
 
-    fn define_type(&mut self, program: &CheckedProgram, description: TypeDescription) -> TypeCheckResult<TypeId> {
-        if let Some(existing) = self
-            .concrete_types
-            .iter()
-            .find(|typ| {
-                match description {
-                    TypeDescription::Unknown => panic!("Trying to define unknown type"),
-                    TypeDescription::Struct(type_id) => if type_id == TypeId::unknown() { false } else { description == typ.description },
-                    TypeDescription::Enum(type_id) => if type_id == TypeId::unknown() { false } else { description == typ.description },
-                    _ => description == typ.description,
+    fn define_type(
+        &mut self,
+        program: &CheckedProgram,
+        description: TypeDescription,
+    ) -> TypeCheckResult<TypeId> {
+        if let Some(existing) = self.concrete_types.iter().find(|typ| match description {
+            TypeDescription::Unknown => panic!("Trying to define unknown type"),
+            TypeDescription::Struct(type_id) => {
+                if type_id == TypeId::unknown() {
+                    false
+                } else {
+                    description == typ.description
                 }
+            }
+            TypeDescription::Enum(type_id) => {
+                if type_id == TypeId::unknown() {
+                    false
+                } else {
+                    description == typ.description
+                }
+            }
+            _ => description == typ.description,
+        }) {
+            err!(StructRedefinition {
+                name: type_name(program, self, existing.type_id())
             })
-        {
-            err!(StructRedefinition { name: type_name(program, self, existing.type_id()) })
         } else {
             self.next_id += 1;
             let type_id = TypeId {
@@ -460,22 +477,31 @@ impl DefinedTypes {
 
             Ok(type_id)
         }
- 
     }
 
     fn get_or_define_type(&mut self, description: TypeDescription) -> TypeId {
-        if let Some(existing) = self
-            .concrete_types
-            .iter()
-            .enumerate()
-            .find(|(_, typ)| {
-                match description {
+        if let Some(existing) =
+            self.concrete_types
+                .iter()
+                .enumerate()
+                .find(|(_, typ)| match description {
                     TypeDescription::Unknown => panic!("Trying to define unknown type"),
-                    TypeDescription::Struct(type_id) => if type_id == TypeId::unknown() { false } else { description == typ.description },
-                    TypeDescription::Enum(type_id) => if type_id == TypeId::unknown() { false } else { description == typ.description },
+                    TypeDescription::Struct(type_id) => {
+                        if type_id == TypeId::unknown() {
+                            false
+                        } else {
+                            description == typ.description
+                        }
+                    }
+                    TypeDescription::Enum(type_id) => {
+                        if type_id == TypeId::unknown() {
+                            false
+                        } else {
+                            description == typ.description
+                        }
+                    }
                     _ => description == typ.description,
-                }
-            })
+                })
         {
             TypeId { id: existing.0 }
         } else {
@@ -497,7 +523,11 @@ impl DefinedTypes {
 fn print_defined_types(program: &CheckedProgram, types: &DefinedTypes) {
     println!("Concrete types:");
     for concrete_type in &types.concrete_types {
-        println!("{}: '{}'", concrete_type.type_id().id, type_name(program, types, concrete_type.type_id()))
+        println!(
+            "{}: '{}'",
+            concrete_type.type_id().id,
+            type_name(program, types, concrete_type.type_id())
+        )
     }
     println!("\nGeneric Types:");
     for generic_type in &types.generic_types {
@@ -505,7 +535,12 @@ fn print_defined_types(program: &CheckedProgram, types: &DefinedTypes) {
     }
 }
 
-fn are_assignment_compatible(program: &CheckedProgram, types: &DefinedTypes, lhs: TypeId, rhs: TypeId) -> bool {
+fn are_assignment_compatible(
+    program: &CheckedProgram,
+    types: &DefinedTypes,
+    lhs: TypeId,
+    rhs: TypeId,
+) -> bool {
     if let TypeDescription::Struct(_)= types.get_type_description(lhs)
         && rhs == program.structs.get("<empty_struct>").unwrap().type_id {
         true
@@ -529,16 +564,12 @@ pub fn type_name(program: &CheckedProgram, types: &DefinedTypes, id: TypeId) -> 
             BuiltinType::String => "string".to_string(),
         },
         TypeDescription::Unknown => "<unknown>".to_string(),
-        TypeDescription::Struct(_)=> {
-                program
-                .structs
-                .iter()
-                .find(|p| p.1.type_id().is_exactly(id))
-                .map(|p| p.0.to_string())
-                .unwrap_or_else(|| {
-                    panic!("Asked for struct by undefined type id '{:#?}'", id)
-                })
-            }
+        TypeDescription::Struct(_) => program
+            .structs
+            .iter()
+            .find(|p| p.1.type_id().is_exactly(id))
+            .map(|p| p.0.to_string())
+            .unwrap_or_else(|| panic!("Asked for struct by undefined type id '{:#?}'", id)),
         TypeDescription::GenericInstance {
             generic_id,
             type_arguments,
@@ -557,16 +588,12 @@ pub fn type_name(program: &CheckedProgram, types: &DefinedTypes, id: TypeId) -> 
                 todo!("Non-array generics");
             }
         }
-        TypeDescription::Enum(_)=>{
-            program
+        TypeDescription::Enum(_) => program
             .enums
             .iter()
             .find(|e| e.1.type_id().is_exactly(id))
             .map(|e| e.0.to_string())
-            .unwrap_or_else(|| {
-                panic!("Asked for struct by undefined type id '{:#?}'", id)
-            })
-        }
+            .unwrap_or_else(|| panic!("Asked for struct by undefined type id '{:#?}'", id)),
         TypeDescription::GenericParameter(_) => todo!(),
     }
 }
@@ -658,7 +685,7 @@ pub enum CheckedStatement {
     For {
         iterator: CheckedExpression,
         body: Vec<CheckedStatement>,
-    }
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -666,7 +693,6 @@ pub struct CheckedProcedure {
     pub name: String,
     pub body: Vec<CheckedStatement>,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckedEnumVariant {
@@ -698,7 +724,6 @@ pub struct CheckedProgram {
     pub enums: HashMap<String, CheckedEnum>,
     pub main: CheckedProcedure,
 }
-
 
 impl Typed for CheckedEnum {
     fn type_id(&self) -> TypeId {
@@ -733,10 +758,12 @@ pub fn get_struct_for_type<'a>(
 ) -> TypeCheckResult<&'a CheckedStruct> {
     let type_name = type_name(program, types, id);
 
-    Ok(program
-        .structs
-        .get(&type_name)
-        .unwrap_or_else(|| panic!("Struct '{}' is not defined in program despite being found in defined types", type_name)))
+    Ok(program.structs.get(&type_name).unwrap_or_else(|| {
+        panic!(
+            "Struct '{}' is not defined in program despite being found in defined types",
+            type_name
+        )
+    }))
 }
 
 #[derive(Error, Debug)]
@@ -755,12 +782,15 @@ pub enum TypeCheckError {
     AssignmentMissmatch { common: TypeCheckErrorCommon },
     #[error("Incompatible types in binary expression. '{common}'")]
     BinaryExpressionMissmatch { common: TypeCheckErrorCommon },
-    #[error("Assertions must contain exactly one expression that evalutes to a boolean value. '{common}'")]
+    #[error("Assertions must contain exactly one expression that evaluates to a boolean value. '{common}'")]
     AssertionExpressionType { common: TypeCheckErrorCommon },
     #[error("Undefined enum '{name}'")]
     UndefinedEnum { name: String },
     #[error("Variant '{variant_name}' of enum '{enum_name}' is undefined")]
-    UndefinedEnumVariant{ variant_name: String , enum_name: String },
+    UndefinedEnumVariant {
+        variant_name: String,
+        enum_name: String,
+    },
     #[error("Variant '{variant_name}' of enum '{enum_name}' has non-void type '{variant_type_name}' but no initializer")]
     MissingEnumVariantInitializer {
         enum_name: String,
@@ -811,16 +841,14 @@ pub enum TypeCheckError {
         expr_type: String,
     },
     #[error(
-        "Trying to iterate over expression '{:#?}' of type '{type_name}'. Only arrays can be iterated over"
+        "Trying to iterate over expression '{type_name:#?}' of type '{type_name}'. Only arrays can be iterated over"
     )]
     NonArrayIteration {
         type_name: String,
         expr: CheckedExpression,
     },
     #[error("Incorrect type for unary expression with operator '{}'. Expression '{:#?}' evaluates to type '{}'. Expected '{}'.", .common.context["op"], .common.expr, .common.actual, .common.expected)]
-    UnaryOpMissmatch {
-        common: TypeCheckErrorCommon,
-    },
+    UnaryOpMissmatch { common: TypeCheckErrorCommon },
     #[error("Non-exhaustive patterns in arms of match expression. Expression '{expr:#?}' evaluates to type '{expr_type}' but match arms '{arms:#?}' do not cover all values of '{expr_type}'")]
     NonExhaustiveMatch {
         expr: CheckedExpression,
@@ -834,7 +862,7 @@ pub enum TypeCheckError {
         arm_type: String,
         arm_expr: CheckedExpression,
         match_type: String,
-    }
+    },
 }
 
 use TypeCheckError::*;
@@ -887,7 +915,8 @@ macro_rules! eval_rhs_and_check {
     ($program:expr, $types:expr, $scope:expr ,$assignee:expr, $rhs:expr, $error:ident) => {{
         let rhs_checked = typecheck_expression($program, $types, $scope, $rhs)?;
 
-        if !are_assignment_compatible($program, $types, $assignee.type_id(), rhs_checked.type_id()) {
+        if !are_assignment_compatible($program, $types, $assignee.type_id(), rhs_checked.type_id())
+        {
             err!(TypeCheckError::$error {
                 common: TypeCheckErrorCommon {
                     actual: type_name($program, $types, rhs_checked.type_id()),
@@ -909,7 +938,8 @@ macro_rules! eval_rhs_and_check {
 
         let rhs_checked = typecheck_expression($program, $types, $scope, $rhs)?;
 
-        if !are_assignment_compatible($program, $types,$assignee.type_id(), rhs_checked.type_id()) {
+        if !are_assignment_compatible($program, $types, $assignee.type_id(), rhs_checked.type_id())
+        {
             err!(TypeCheckError::$error {
                 common: TypeCheckErrorCommon {
                     actual: type_name($program, $types, rhs_checked.type_id()),
@@ -928,7 +958,14 @@ pub fn typecheck_program(mut program: Program) -> TypeCheckResult<CheckedProgram
     let mut types = DefinedTypes::from_builtin();
 
     // TODO: remove this hack
-    program.structs.insert("<empty_struct>".to_string(), Struct {name: "<empty_struct>".to_string(), fields: Vec::new(), generic_parameters: Vec::new()});
+    program.structs.insert(
+        "<empty_struct>".to_string(),
+        Struct {
+            name: "<empty_struct>".to_string(),
+            fields: Vec::new(),
+            generic_parameters: Vec::new(),
+        },
+    );
 
     // Predecl all structs so they can be used in function type signatures
     let predecl_structs: HashMap<_, _> = program
@@ -947,13 +984,12 @@ pub fn typecheck_program(mut program: Program) -> TypeCheckResult<CheckedProgram
         })
         .collect();
 
-
     // Predecl all enums so they can be used in function type signatures
     let predecl_enums: HashMap<_, _> = program
         .enums
         .iter()
         .map(|s| {
-                let type_id = types.get_or_define_type(TypeDescription::Enum(TypeId::unknown()));
+            let type_id = types.get_or_define_type(TypeDescription::Enum(TypeId::unknown()));
             (
                 s.0.clone(),
                 CheckedEnum {
@@ -982,7 +1018,6 @@ pub fn typecheck_program(mut program: Program) -> TypeCheckResult<CheckedProgram
         })
         .collect();
 
-
     let mut checked_program = CheckedProgram::new(
         predecl_structs,
         predecl_functions,
@@ -997,10 +1032,16 @@ pub fn typecheck_program(mut program: Program) -> TypeCheckResult<CheckedProgram
 
     print_defined_types(&checked_program, &types);
 
-    checked_program.enums = program.enums.into_iter().map(|e| {
-        Ok((e.0.clone(), typecheck_enum(&checked_program, &mut types, &GLOBAL_SCOPE, e.1)?))
-    }).collect::<Result<_, _>>()?;
-
+    checked_program.enums = program
+        .enums
+        .into_iter()
+        .map(|e| {
+            Ok((
+                e.0.clone(),
+                typecheck_enum(&checked_program, &mut types, &GLOBAL_SCOPE, e.1)?,
+            ))
+        })
+        .collect::<Result<_, _>>()?;
 
     // TODO: I need another step here because at this point struct types are not evaluated, so
     // using structs inside a function expression won't work. In realtity, I need to typecheck
@@ -1015,7 +1056,7 @@ pub fn typecheck_program(mut program: Program) -> TypeCheckResult<CheckedProgram
         .map(|f| {
             Ok((
                 f.0.clone(),
-                typecheck_function(&checked_program, &mut types, &GLOBAL_SCOPE, f.1)?
+                typecheck_function(&checked_program, &mut types, &GLOBAL_SCOPE, f.1)?,
             ))
         })
         .collect::<Result<HashMap<_, _>, _>>()?;
@@ -1101,13 +1142,15 @@ fn typecheck_enum(
         .collect::<Result<_, _>>()?;
 
     Ok(CheckedEnum {
-        type_id: program.enums.get(&enumeration.name).expect("Enum not predeclared").type_id,
+        type_id: program
+            .enums
+            .get(&enumeration.name)
+            .expect("Enum not predeclared")
+            .type_id,
         name: enumeration.name,
         variants,
     })
 }
-
-
 
 fn typecheck_struct(
     program: &CheckedProgram,
@@ -1126,12 +1169,17 @@ fn typecheck_struct(
             let field_type = typecheck_parsed_type(program, types, &field.parsed_type)?;
             let initializer = typecheck_expression(program, types, scope, field.initializer)?;
 
-            if !are_assignment_compatible(program, types, field_type.type_id(), initializer.type_id()) {
+            if !are_assignment_compatible(
+                program,
+                types,
+                field_type.type_id(),
+                initializer.type_id(),
+            ) {
                 return err!(FieldInitializerMissmatch {
                     common: TypeCheckErrorCommon {
                         actual: type_name(program, types, initializer.type_id()),
                         expr: initializer,
-                        expected: type_name(program, types,field_type.type_id()),
+                        expected: type_name(program, types, field_type.type_id()),
                         context: HashMap::new(),
                     },
                 });
@@ -1146,44 +1194,53 @@ fn typecheck_struct(
         .collect::<Result<_, _>>()?;
 
     Ok(CheckedStruct {
-        type_id: program.structs.get(&structure.name).expect("Struct not predeclared").type_id,
+        type_id: program
+            .structs
+            .get(&structure.name)
+            .expect("Struct not predeclared")
+            .type_id,
         name: structure.name,
         fields,
     })
 }
 
-    fn typecheck_parsed_type(program: &CheckedProgram, types: &mut DefinedTypes, parsed_type: &ParsedType) -> TypeCheckResult<TypeId> {
-        Ok(match &parsed_type {
-            // Unwrap: ParsedTypes occur in the source code, so they must be build-in or
-            // user-d&efined
-            ParsedType::Simple { name } => match name.as_str() {
-                name @ ("u64" | "string" | "bool") => TypeId::builtin(name),
-                _ => program.structs.get(name).map(|s| s.type_id())
-                    .or_else(|| program.enums.get(name).map(|e| e.type_id()))
-                    .ok_or_else(|| wrap!(UndefinedType{ name: name.clone() }))?,
-            },
-            ParsedType::Array { inner } => {
-                let inner_id = typecheck_parsed_type(program, types, inner)?;
+fn typecheck_parsed_type(
+    program: &CheckedProgram,
+    types: &mut DefinedTypes,
+    parsed_type: &ParsedType,
+) -> TypeCheckResult<TypeId> {
+    Ok(match &parsed_type {
+        // Unwrap: ParsedTypes occur in the source code, so they must be built-in or
+        // user-d&efined
+        ParsedType::Simple { name } => match name.as_str() {
+            name @ ("u64" | "string" | "bool") => TypeId::builtin(name),
+            _ => program
+                .structs
+                .get(name)
+                .map(|s| s.type_id())
+                .or_else(|| program.enums.get(name).map(|e| e.type_id()))
+                .ok_or_else(|| wrap!(UndefinedType { name: name.clone() }))?,
+        },
+        ParsedType::Array { inner } => {
+            let inner_id = typecheck_parsed_type(program, types, inner)?;
 
-                let array_type_id = types
-                    .generic_types
-                    .iter()
-                    .find(|generic| generic.name == "array")
-                    .expect("array type undefined")
-                    .generic_id;
+            let array_type_id = types
+                .generic_types
+                .iter()
+                .find(|generic| generic.name == "array")
+                .expect("array type undefined")
+                .generic_id;
 
-                types.get_or_define_type(TypeDescription::GenericInstance {
-                    generic_id: array_type_id,
-                    type_arguments: vec![inner_id],
-                })
-            }
+            types.get_or_define_type(TypeDescription::GenericInstance {
+                generic_id: array_type_id,
+                type_arguments: vec![inner_id],
+            })
+        }
 
-            ParsedType::Void => TypeId::builtin("void"),
-            ParsedType::Unknown => TypeId::unknown(),
-        })
-    }
-
-
+        ParsedType::Void => TypeId::builtin("void"),
+        ParsedType::Unknown => TypeId::unknown(),
+    })
+}
 
 fn typecheck_function(
     program: &CheckedProgram,
@@ -1309,7 +1366,7 @@ pub fn typecheck_statement(
 
             let rhs = eval_rhs_and_check!(program, types, scope, lhs, rhs, AssignmentMissmatch)?;
 
-            // Just here so the compile fails if I add more assing ops that might change the type.
+            // Just here so the compile fails if I add more assign ops that might change the type.
             match assign_op {
                 AssignOp::Equal => (),
                 AssignOp::PlusEqual => (),
@@ -1407,9 +1464,7 @@ fn typecheck_binary_op(
     op: BinaryOp,
     expected_type: TypeId,
 ) -> TypeCheckResult<()> {
-    if !lhs_type.is_exactly(expected_type)
-        || !rhs_type.is_exactly(expected_type)
-    {
+    if !lhs_type.is_exactly(expected_type) || !rhs_type.is_exactly(expected_type) {
         err!(BinaryOpType {
             lhs_type: type_name(program, types, lhs_type),
             rhs_type: type_name(program, types, rhs_type),
@@ -1451,7 +1506,7 @@ pub fn typecheck_access_expression(
 
                     if *generic_id != array_type {
                         return err!(NonArraySubscript {
-                            expr_type: type_name(program, types,type_id),
+                            expr_type: type_name(program, types, type_id),
                             expr: access_clone.clone(), // TODO: This is a little imprecise
                         });
                     }
@@ -1462,7 +1517,7 @@ pub fn typecheck_access_expression(
                     type_id = *type_arguments.first().unwrap();
                 } else {
                     return err!(NonArraySubscript {
-                        expr_type: type_name(program, types,type_id),
+                        expr_type: type_name(program, types, type_id),
                         expr: access_clone.clone(), // TODO: This is a little imprecise
                     });
                 }
@@ -1484,7 +1539,7 @@ pub fn typecheck_access_expression(
             Indirection::Field { field_name } => {
                 if type_id.is_builtin() {
                     return err!(UndefinedStructField {
-                        struct_name: type_name(program, types,type_id),
+                        struct_name: type_name(program, types, type_id),
                         field_name,
                     });
                 }
@@ -1511,26 +1566,35 @@ pub fn typecheck_unary_expression(
     unary: UnaryExpression,
 ) -> TypeCheckResult<CheckedUnaryExpression> {
     match unary {
-        UnaryExpression::Access(expr) => Ok(CheckedUnaryExpression::Access(typecheck_access_expression(program, types, scope, expr)?)),
-        UnaryExpression::WithUnary { op, expr } => {
-            match op {
-                UnaryOp::Not => {
-                    let expr = Box::new(typecheck_unary_expression(program, types, scope, *expr)?);
-                    if !are_assignment_compatible(program, types, expr.type_id(), TypeId::builtin("bool")) {
-                        return err!(UnaryOpMissmatch {
-                            common: TypeCheckErrorCommon {
+        UnaryExpression::Access(expr) => Ok(CheckedUnaryExpression::Access(
+            typecheck_access_expression(program, types, scope, expr)?,
+        )),
+        UnaryExpression::WithUnary { op, expr } => match op {
+            UnaryOp::Not => {
+                let expr = Box::new(typecheck_unary_expression(program, types, scope, *expr)?);
+                if !are_assignment_compatible(
+                    program,
+                    types,
+                    expr.type_id(),
+                    TypeId::builtin("bool"),
+                ) {
+                    return err!(UnaryOpMissmatch {
+                        common: TypeCheckErrorCommon {
                             actual: type_name(program, types, expr.type_id()),
                             expr: CheckedExpression::Unary(*expr),
                             expected: type_name(program, types, TypeId::builtin("bool")),
                             context: HashMap::from([("op".to_string(), "not".to_string())]),
-                            },
-                        })
-                    }
-
-                    Ok(CheckedUnaryExpression::WithUnary { op, expr, type_id: TypeId::builtin("bool") })
+                        },
+                    });
                 }
+
+                Ok(CheckedUnaryExpression::WithUnary {
+                    op,
+                    expr,
+                    type_id: TypeId::builtin("bool"),
+                })
             }
-        }
+        },
     }
 }
 
@@ -1610,8 +1674,11 @@ pub fn typecheck_simple_expression(
                 CheckedSimpleExpression::StructLiteral {
                     type_name: None,
                     fields: Vec::new(),
-                    type_id: program.structs.get("<empty_struct>")
-                        .expect("Empty struct undefined").type_id,
+                    type_id: program
+                        .structs
+                        .get("<empty_struct>")
+                        .expect("Empty struct undefined")
+                        .type_id,
                 }
             } else {
                 todo!("I'm not sure if I want to allow {{a: 2}} or {{a: int = 2}} literals without a type name, or just c-style literals.")
@@ -1629,18 +1696,6 @@ pub fn typecheck_simple_expression(
 
             CheckedSimpleExpression::StateAccess { name, type_id }
         }
-        SimpleExpression::ExecutionAccess {
-            execution,
-            access_expression,
-        } => CheckedSimpleExpression::ExecutionAccess {
-            execution,
-            access_expression: Box::new(typecheck_access_expression(
-                program,
-                types,
-                scope,
-                *access_expression,
-            )?),
-        },
         SimpleExpression::BindingAccess { name } => {
             let Binding { type_id, .. } = scope.find_binding(&name)?;
 
@@ -1658,53 +1713,106 @@ pub fn typecheck_simple_expression(
 
             let unchecked_arms = arms.clone();
 
-            let arms = arms.into_iter().map(|arm| {
-                match arm.pattern {
-                    Pattern::Value(_num) => {
-                        // TODO: Check values for exhaustiveness
-                    },
-                    Pattern::Else =>  {
-                        exhaustive = true;
+            let arms = arms
+                .into_iter()
+                .map(|arm| {
+                    match arm.pattern {
+                        Pattern::Value(_num) => {
+                            // TODO: Check values for exhaustiveness
+                        }
+                        Pattern::Else => {
+                            exhaustive = true;
+                        }
+                    };
+
+                    let rhs = typecheck_expression(program, types, scope, arm.rhs)?;
+                    if match_type == TypeId::unknown() {
+                        match_type = rhs.type_id();
                     }
-                };
 
-                let rhs = typecheck_expression(program, types, scope, arm.rhs)?;
-                        if match_type == TypeId::unknown() {
-                            match_type = rhs.type_id();
-                        }
+                    if rhs.type_id() != match_type {
+                        return err!(MatchTypeMissmatch {
+                            match_type: type_name(program, types, match_type),
+                            arm_expr: rhs,
+                            arm_pattern: arm.pattern,
+                            arm_type: "u64".to_string()
+                        });
+                    }
 
-                        if rhs.type_id() != match_type {
-                            return err!(MatchTypeMissmatch {match_type: type_name(program, types, match_type), arm_expr: rhs, arm_pattern: arm.pattern, arm_type: "u64".to_string()});
-                        }
-
-                        Ok(CheckedMatchArm{pattern: arm.pattern, rhs, })
-
-            }).collect::<Result<Vec<_>,_>>()?;
+                    Ok(CheckedMatchArm {
+                        pattern: arm.pattern,
+                        rhs,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
 
             if !exhaustive || match_type == TypeId::unknown() {
-                return err!(NonExhaustiveMatch{expr_type: type_name(program, types, expr.type_id()), expr: *expr, arms: unchecked_arms, });
+                return err!(NonExhaustiveMatch {
+                    expr_type: type_name(program, types, expr.type_id()),
+                    expr: *expr,
+                    arms: unchecked_arms,
+                });
             }
 
-            CheckedSimpleExpression::Match{ expr, arms, type_id: match_type }
+            CheckedSimpleExpression::Match {
+                expr,
+                arms,
+                type_id: match_type,
+            }
         }
-        SimpleExpression::EnumVariant { enum_name, variant_name, initializer } => {
-            let enumeration = program.enums.get(&enum_name).ok_or_else(|| wrap!(UndefinedEnum{name: enum_name.to_string()}))?;
+        SimpleExpression::EnumVariant {
+            enum_name,
+            variant_name,
+            initializer,
+        } => {
+            let enumeration = program.enums.get(&enum_name).ok_or_else(|| {
+                wrap!(UndefinedEnum {
+                    name: enum_name.to_string()
+                })
+            })?;
 
-            let variant = enumeration.variants.iter().find(|variant| variant.name == variant_name).ok_or_else(||wrap!(UndefinedEnumVariant {enum_name: enum_name.clone(), variant_name: variant_name.clone()}))?;
-
+            let variant = enumeration
+                .variants
+                .iter()
+                .find(|variant| variant.name == variant_name)
+                .ok_or_else(|| {
+                    wrap!(UndefinedEnumVariant {
+                        enum_name: enum_name.clone(),
+                        variant_name: variant_name.clone()
+                    })
+                })?;
 
             if type_name(program, types, variant.type_id()) != "void" && initializer.is_none() {
-                return err!(MissingEnumVariantInitializer { variant_name, enum_name, variant_type_name: type_name(program, types, variant.type_id())});
+                return err!(MissingEnumVariantInitializer {
+                    variant_name,
+                    enum_name,
+                    variant_type_name: type_name(program, types, variant.type_id())
+                });
             }
 
-            let initializer = initializer.map(|init| {
-                eval_rhs_and_check!(program, types, scope, variant.type_id(), *init, EnumVariantInitMissmatch, [("enum_name", enum_name), ("variant_name", variant_name.clone())]).map(Box::new)
-            }).transpose()?;
+            let initializer = initializer
+                .map(|init| {
+                    eval_rhs_and_check!(
+                        program,
+                        types,
+                        scope,
+                        variant.type_id(),
+                        *init,
+                        EnumVariantInitMissmatch,
+                        [
+                            ("enum_name", enum_name),
+                            ("variant_name", variant_name.clone())
+                        ]
+                    )
+                    .map(Box::new)
+                })
+                .transpose()?;
 
-
-            CheckedSimpleExpression::EnumVariant { type_id: enumeration.type_id(), variant_name, initializer }
-
-        },
+            CheckedSimpleExpression::EnumVariant {
+                type_id: enumeration.type_id(),
+                variant_name,
+                initializer,
+            }
+        }
     })
-
 }

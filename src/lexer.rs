@@ -20,12 +20,6 @@ pub enum UnaryOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ExecutionDesignator {
-    Past,
-    Current,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TokenKind {
     Number,
     String,
@@ -35,7 +29,6 @@ pub enum TokenKind {
     BinaryOp(BinaryOp),
     AssignOp(AssignOp),
     UnaryOp(UnaryOp),
-    ExecutionDesignator(ExecutionDesignator),
     Identifier,
     SmallArrow,
     FatArrow,
@@ -172,12 +165,6 @@ impl<'a> Lexer<'a> {
                 _ => TokenKind::AssignOp(AssignOp::Equal),
             },
             b'/' => TokenKind::Slash,
-            b'c' => {
-                return Some(self.keyword_or_identifier(
-                    "urrent",
-                    TokenKind::ExecutionDesignator(ExecutionDesignator::Current),
-                ))
-            }
             b'<' => TokenKind::Less,
             b'>' => TokenKind::More,
             b'[' => TokenKind::LeftBracket,
@@ -205,12 +192,6 @@ impl<'a> Lexer<'a> {
             },
             b'p' => match self.advance()? {
                 b'r' => return Some(self.keyword_or_identifier("ocedure", TokenKind::Procedure)),
-                b'a' => {
-                    return Some(self.keyword_or_identifier(
-                        "st",
-                        TokenKind::ExecutionDesignator(ExecutionDesignator::Past),
-                    ))
-                }
                 _ => return Some(self.identifier()),
             },
             b's' => return Some(self.keyword_or_identifier("truct", TokenKind::Struct)),
