@@ -23,14 +23,6 @@ procedure increment {
     .num +=1;
 }
 
-assertion increment_good {
-    current:.num == current:.stored + 1
-}
-
-assertion ambitious {
-    (current:.s.num + 1) == (past:.s.num + 1 + 1)
-}
-
 //procedure fallible {
 //    error "Unlucky"
 //}
@@ -85,7 +77,6 @@ procedure main {
     .num = .num + 1;
     ..store;
     ..increment;
-    !increment_good;
     .num = plus_one(plus_one(8));
     .stored = add(14, 100);
 

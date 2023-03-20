@@ -36,7 +36,6 @@ pub enum TokenKind {
     Less,
     More,
     Procedure,
-    Assertion,
     Function,
     SemiColon,
     DotDot,
@@ -182,7 +181,6 @@ impl<'a> Lexer<'a> {
                 _ => return Some(self.identifier()),
             },
             b'a' => match self.advance()? {
-                b's' => return Some(self.keyword_or_identifier("sertion", TokenKind::Assertion)),
                 b'n' => {
                     return Some(
                         self.keyword_or_identifier("d", TokenKind::BinaryOp(BinaryOp::And)),

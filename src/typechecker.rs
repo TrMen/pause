@@ -10,8 +10,8 @@ use thiserror::Error;
 use crate::{
     lexer::{AssignOp, BinaryOp, UnaryOp},
     parser::{
-        AccessExpression, Assertion, Enum, Expression, Function, GenericParameter, Indirection,
-        MatchArm, ParsedType, Pattern, Procedure, Program, SimpleExpression, Statement, Struct,
+        AccessExpression, Enum, Expression, Function, GenericParameter, Indirection, MatchArm,
+        ParsedType, Pattern, Procedure, Program, SimpleExpression, Statement, Struct,
         UnaryExpression,
     },
 };
@@ -99,7 +99,7 @@ static GLOBAL_SCOPE: Scope = Scope {
     bindings: Vec::new(),
 };
 
-// TODO: Make scope a lifetime thing to avoid having deepcopy outer
+// TODO: Make scope a lifetime thing to avoid having to deepcopy outer
 impl Scope {
     pub fn inner_with_bindings(&self, bindings: Vec<Binding>) -> Self {
         Self {
@@ -443,7 +443,7 @@ impl DefinedTypes {
         program: &CheckedProgram,
         description: TypeDescription,
     ) -> TypeCheckResult<TypeId> {
-        if let Some(existing) = self.concrete_types.iter().find(|typ| match description {
+        let existing = self.concrete_types.iter().find(|typ| match description {
             TypeDescription::Unknown => panic!("Trying to define unknown type"),
             TypeDescription::Struct(type_id) => {
                 if type_id == TypeId::unknown() {
@@ -460,8 +460,10 @@ impl DefinedTypes {
                 }
             }
             _ => description == typ.description,
-        }) {
-            err!(StructRedefinition {
+        });
+
+        if let Some(existing) = existing {
+            err!(TypeRedefinition {
                 name: type_name(program, self, existing.type_id())
             })
         } else {
@@ -663,16 +665,7 @@ pub struct CheckedFunction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CheckedAssertion {
-    pub name: String,
-    pub predicate: CheckedExpression,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CheckedStatement {
-    AssertionCall {
-        name: String,
-    },
     ProcedureCall {
         name: String,
     },
@@ -719,7 +712,6 @@ pub struct CheckedProgram {
     // around without having to also pass it's name.
     pub structs: HashMap<String, CheckedStruct>,
     pub functions: HashMap<String, CheckedFunction>,
-    pub assertions: HashMap<String, CheckedAssertion>,
     pub procedures: HashMap<String, CheckedProcedure>,
     pub enums: HashMap<String, CheckedEnum>,
     pub main: CheckedProcedure,
@@ -735,14 +727,12 @@ impl CheckedProgram {
     pub fn new(
         structs: HashMap<String, CheckedStruct>,
         functions: HashMap<String, CheckedFunction>,
-        assertions: HashMap<String, CheckedAssertion>,
         procedures: HashMap<String, CheckedProcedure>,
         enums: HashMap<String, CheckedEnum>,
         main: CheckedProcedure,
     ) -> Self {
         Self {
             procedures,
-            assertions,
             functions,
             structs,
             enums,
@@ -772,8 +762,10 @@ pub enum TypeCheckError {
     ArrayMissmatch { common: TypeCheckErrorCommon },
     #[error("Function expression does not match return type. '{common}'")]
     FunctionReturn { common: TypeCheckErrorCommon },
-    #[error("Name '{name}' is already defined in this scope. Must be unique.")]
+    #[error("Binding '{name}' is already defined in this scope. Must be unique.")]
     BindingAlreadyDefined { name: String },
+    #[error("Generic '{name}' is already defined in this scope. Must be unique.")]
+    GenericAlreadyDefined { name: String },
     #[error("Binding '{name}' is not defined")]
     UndefinedBinding { name: String },
     #[error("Declared type of structure field does not match type of initializer expression. '{common}'")]
@@ -782,8 +774,6 @@ pub enum TypeCheckError {
     AssignmentMissmatch { common: TypeCheckErrorCommon },
     #[error("Incompatible types in binary expression. '{common}'")]
     BinaryExpressionMissmatch { common: TypeCheckErrorCommon },
-    #[error("Assertions must contain exactly one expression that evaluates to a boolean value. '{common}'")]
-    AssertionExpressionType { common: TypeCheckErrorCommon },
     #[error("Undefined enum '{name}'")]
     UndefinedEnum { name: String },
     #[error("Variant '{variant_name}' of enum '{enum_name}' is undefined")]
@@ -797,8 +787,6 @@ pub enum TypeCheckError {
         variant_type_name: String,
         variant_name: String,
     },
-    #[error("Call to undefined assertion '{name}'")]
-    UndefinedAssertion { name: String },
     #[error("Call to undefined function '{name}'")]
     UndefinedFunction { name: String },
     #[error("Call to undefined function '{name}'")]
@@ -831,8 +819,8 @@ pub enum TypeCheckError {
     ParamArgMissmatch { common: TypeCheckErrorCommon },
     #[error("Trying to initialize variant '{}' of enum '{}' with expression '{:#?} that evaluates to type '{}'. Variant has type '{}'", .common.context["variant_name"], .common.context["enum_name"], .common.expr, .common.actual, .common.expected)]
     EnumVariantInitMissmatch { common: TypeCheckErrorCommon },
-    #[error("Struct '{name}' is already defined.")]
-    StructRedefinition { name: String },
+    #[error("Type '{name}' is already defined.")]
+    TypeRedefinition { name: String },
     #[error(
         "Trying index into expression '{expr:#?}' of type '{expr_type}' as if it were an array."
     )]
@@ -1022,7 +1010,6 @@ pub fn typecheck_program(mut program: Program) -> TypeCheckResult<CheckedProgram
         predecl_structs,
         predecl_functions,
         HashMap::new(),
-        HashMap::new(),
         predecl_enums,
         CheckedProcedure {
             name: "main".to_string(),
@@ -1074,18 +1061,6 @@ pub fn typecheck_program(mut program: Program) -> TypeCheckResult<CheckedProgram
         })
         .collect::<Result<HashMap<_, _>, _>>()?;
 
-    // Then check assertions since they can be used by procedures.
-    checked_program.assertions = program
-        .assertions
-        .into_iter()
-        .map(|a| {
-            Ok((
-                a.0.clone(),
-                typecheck_assertion(&checked_program, &mut types, &GLOBAL_SCOPE, a.1)?,
-            ))
-        })
-        .collect::<Result<HashMap<_, _>, _>>()?;
-
     // Then predecl procedures since they can refer to other procedures
     checked_program.procedures = program
         .procedures
@@ -1118,38 +1093,6 @@ pub fn typecheck_program(mut program: Program) -> TypeCheckResult<CheckedProgram
         typecheck_procedure(&checked_program, &mut types, &GLOBAL_SCOPE, program.main)?;
 
     Ok(checked_program)
-}
-
-fn typecheck_enum(
-    program: &CheckedProgram,
-    types: &mut DefinedTypes,
-    _scope: &Scope,
-    enumeration: Enum,
-) -> TypeCheckResult<CheckedEnum> {
-    check_unique(enumeration.variants.iter().map(|e| &e.name))?;
-
-    let variants = enumeration
-        .variants
-        .into_iter()
-        .map(|variant| {
-            let variant_type = typecheck_parsed_type(program, types, &variant.parsed_type)?;
-
-            Ok(CheckedEnumVariant {
-                name: variant.name,
-                variant_type,
-            })
-        })
-        .collect::<Result<_, _>>()?;
-
-    Ok(CheckedEnum {
-        type_id: program
-            .enums
-            .get(&enumeration.name)
-            .expect("Enum not predeclared")
-            .type_id,
-        name: enumeration.name,
-        variants,
-    })
 }
 
 fn typecheck_struct(
@@ -1204,14 +1147,44 @@ fn typecheck_struct(
     })
 }
 
+fn typecheck_enum(
+    program: &CheckedProgram,
+    types: &mut DefinedTypes,
+    _scope: &Scope,
+    enumeration: Enum,
+) -> TypeCheckResult<CheckedEnum> {
+    check_unique(enumeration.variants.iter().map(|e| &e.name))?;
+
+    let variants = enumeration
+        .variants
+        .into_iter()
+        .map(|variant| {
+            let variant_type = typecheck_parsed_type(program, types, &variant.parsed_type)?;
+
+            Ok(CheckedEnumVariant {
+                name: variant.name,
+                variant_type,
+            })
+        })
+        .collect::<Result<_, _>>()?;
+
+    Ok(CheckedEnum {
+        type_id: program
+            .enums
+            .get(&enumeration.name)
+            .expect("Enum not predeclared")
+            .type_id,
+        name: enumeration.name,
+        variants,
+    })
+}
+
 fn typecheck_parsed_type(
     program: &CheckedProgram,
     types: &mut DefinedTypes,
     parsed_type: &ParsedType,
 ) -> TypeCheckResult<TypeId> {
     Ok(match &parsed_type {
-        // Unwrap: ParsedTypes occur in the source code, so they must be built-in or
-        // user-d&efined
         ParsedType::Simple { name } => match name.as_str() {
             name @ ("u64" | "string" | "bool") => TypeId::builtin(name),
             _ => program
@@ -1308,27 +1281,6 @@ fn typecheck_procedure(
     })
 }
 
-fn typecheck_assertion(
-    program: &CheckedProgram,
-    types: &mut DefinedTypes,
-    scope: &Scope,
-    assertion: Assertion,
-) -> TypeCheckResult<CheckedAssertion> {
-    let predicate = eval_rhs_and_check!(
-        program,
-        types,
-        scope,
-        TypeId::builtin("bool"),
-        assertion.predicate,
-        AssertionExpressionType
-    )?;
-
-    Ok(CheckedAssertion {
-        name: assertion.name,
-        predicate,
-    })
-}
-
 pub fn typecheck_statement(
     program: &CheckedProgram,
     types: &mut DefinedTypes,
@@ -1336,17 +1288,6 @@ pub fn typecheck_statement(
     statement: Statement,
 ) -> TypeCheckResult<CheckedStatement> {
     Ok(match statement {
-        Statement::AssertionCall { name } => {
-            // TODO: Do I need to check the called assertion here? I don't think so,
-            // since I check every top-level thing anyway
-            program.assertions.get(&name).ok_or_else(|| {
-                wrap!(UndefinedAssertion {
-                    name: name.to_string(),
-                })
-            })?;
-
-            CheckedStatement::AssertionCall { name }
-        }
         Statement::ProcedureCall { name } => {
             // TODO: Do I need to check the called procedure here? I don't think so,
             // since I check every top-level thing anyway

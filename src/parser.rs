@@ -84,9 +84,6 @@ pub struct AccessExpression {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
-    AssertionCall {
-        name: String,
-    },
     ProcedureCall {
         name: String,
     },
@@ -154,12 +151,6 @@ pub struct Function {
 }
 
 #[derive(Debug, Clone)]
-pub struct Assertion {
-    pub name: String,
-    pub predicate: Expression,
-}
-
-#[derive(Debug, Clone)]
 pub struct EnumVariant {
     pub name: String,
     pub parsed_type: ParsedType,
@@ -177,7 +168,6 @@ pub struct Program {
     // TODO: This duplicates the name. But I think I really want to be able to pass a Procedure
     // around without having to also pass it's name.
     pub procedures: HashMap<String, Procedure>,
-    pub assertions: HashMap<String, Assertion>,
     pub functions: HashMap<String, Function>,
     pub structs: HashMap<String, Struct>,
     pub enums: HashMap<String, Enum>,
@@ -192,8 +182,6 @@ pub enum ParseError {
     MissingState,
     #[error("Procedure '{0}' is already defined")]
     ProcedureRedefinition(String),
-    #[error("Assertion '{0}' is already defined")]
-    AssertionRedefinition(String),
     #[error("Function '{0}' is already defined")]
     FunctionRedefinition(String),
     #[error("Struct '{0}' is already defined")]
@@ -214,14 +202,14 @@ use ParseError::*;
 #[error("{error}")]
 pub struct ParseErrorWrapper {
     pub error: ParseError,
-    pub backtrace: std::backtrace::Backtrace,
+    pub backtrace: Box<std::backtrace::Backtrace>,
 }
 
 macro_rules! err {
     ($error:expr) => {
         Err(ParseErrorWrapper {
             error: $error,
-            backtrace: Backtrace::force_capture(),
+            backtrace: Box::new(Backtrace::force_capture()),
         })
     };
 }
@@ -230,7 +218,7 @@ macro_rules! wrap {
     ($error:expr) => {
         ParseErrorWrapper {
             error: $error,
-            backtrace: Backtrace::force_capture(),
+            backtrace: Box::new(Backtrace::force_capture()),
         }
     };
 }
@@ -243,7 +231,6 @@ pub struct Parser {
     index: usize,
     main: Option<Procedure>,
     state: Option<Struct>,
-    assertions: HashMap<String, Assertion>,
     functions: HashMap<String, Function>,
     procedures: HashMap<String, Procedure>,
     structs: HashMap<String, Struct>,
@@ -260,7 +247,7 @@ macro_rules! advance_if_matches {
             .get($self.index)
             .ok_or_else(|| ParseErrorWrapper {
                 error: End("Unexpected end on input".to_string()),
-                backtrace: Backtrace::force_capture(),
+                backtrace: Box::new(Backtrace::force_capture()),
             })?;
 
         Ok(matches!(token.kind, $pattern).then(|| {
@@ -315,7 +302,7 @@ macro_rules! collect_list {
                     expected: $string_terminator.to_string(),
                     got: $self.peek().unwrap().clone(),
                 },
-                backtrace: Backtrace::force_capture(),
+                backtrace: Box::new(Backtrace::force_capture()),
             })?;
         }
 
@@ -345,7 +332,6 @@ impl Parser {
             index: 0,
             main: None,
             state: None,
-            assertions: HashMap::new(),
             functions: HashMap::new(),
             procedures: HashMap::new(),
             structs: HashMap::new(),
@@ -439,17 +425,6 @@ impl Parser {
         Ok(())
     }
 
-    fn define_assertion(&mut self, name: String, predicate: Expression) -> ParseResult<()> {
-        if self.assertions.contains_key(&name) {
-            return err!(AssertionRedefinition(name));
-        }
-
-        self.assertions
-            .insert(name.clone(), Assertion { name, predicate });
-
-        Ok(())
-    }
-
     fn define_struct(
         &mut self,
         name: String,
@@ -500,7 +475,6 @@ impl Parser {
             self.state.unwrap(),
             Program {
                 main: self.main.unwrap(),
-                assertions: self.assertions,
                 functions: self.functions,
                 procedures: self.procedures,
                 enums: self.enums,
@@ -514,7 +488,6 @@ impl Parser {
 
         match token.kind {
             TokenKind::Procedure => self.procedure(),
-            TokenKind::Assertion => self.assertion(),
             TokenKind::Function => self.function(),
             TokenKind::Struct => self.structure(),
             TokenKind::Enum => self.enumeration(),
@@ -627,20 +600,6 @@ impl Parser {
         }
     }
 
-    fn assertion(&mut self) -> ParseResult<()> {
-        let name = self.expect(TokenKind::Identifier)?.lexeme.clone();
-
-        self.expect(TokenKind::LeftBrace)?;
-
-        let predicate = self.expression()?;
-
-        self.expect(TokenKind::RightBrace)?;
-
-        self.define_assertion(name, predicate)?;
-
-        Ok(())
-    }
-
     fn generic_parameters(&mut self) -> ParseResult<Vec<GenericParameter>> {
         Ok(if advance_if_matches!(self, TokenKind::Less)?.is_some() {
             collect_list!(
@@ -728,7 +687,6 @@ impl Parser {
 
                 Statement::For { iterator, body }
             }
-            TokenKind::Bang => self.assertion_statement()?,
             // TODO: This should be extracted into a function somehow
             TokenKind::DotDot => self.procedure_call_statement()?,
             TokenKind::Dot => {
@@ -765,13 +723,6 @@ impl Parser {
                 Statement::Expression(expr)
             }
         })
-    }
-
-    fn assertion_statement(&mut self) -> ParseResult<Statement> {
-        let name = self.expect(TokenKind::Identifier)?.lexeme.clone();
-        self.expect(TokenKind::SemiColon)?;
-
-        Ok(Statement::AssertionCall { name })
     }
 
     fn procedure_call_statement(&mut self) -> ParseResult<Statement> {
